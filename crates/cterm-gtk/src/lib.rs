@@ -63,13 +63,28 @@ pub struct Args {
 /// Global application arguments (accessible from window creation)
 static APP_ARGS: std::sync::OnceLock<Args> = std::sync::OnceLock::new();
 
+/// Executable path captured at startup (before the binary can be replaced on disk)
+static EXE_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 /// Get the application arguments (call only after parse_args())
 pub fn get_args() -> &'static Args {
     APP_ARGS.get().expect("Args not initialized")
 }
 
+/// Get the executable path captured at startup
+pub fn get_exe_path() -> &'static std::path::Path {
+    EXE_PATH.get().expect("Exe path not initialized")
+}
+
 /// Run the GTK4 application
 pub fn run() {
+    // Capture executable path early, before the binary can be replaced on disk.
+    // On Linux, /proc/self/exe appends " (deleted)" after the binary is overwritten,
+    // so we must resolve it now while it's still valid.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = EXE_PATH.set(exe);
+    }
+
     // Parse command-line arguments first (before GTK consumes them)
     let args = Args::parse();
 

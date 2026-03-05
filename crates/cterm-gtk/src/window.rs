@@ -1081,15 +1081,8 @@ impl CtermWindow {
             action.connect_activate(move |_, _| {
                 log::info!("Debug: Re-launching cterm for seamless upgrade test");
 
-                // Get current executable path
-                let current_exe = match std::env::current_exe() {
-                    Ok(path) => path,
-                    Err(e) => {
-                        log::error!("Failed to get current executable path: {}", e);
-                        return;
-                    }
-                };
-
+                // Use the executable path captured at startup (immune to binary replacement)
+                let current_exe = crate::get_exe_path();
                 log::info!("Re-launching from: {:?}", current_exe);
 
                 // Get the current tabs for state collection
