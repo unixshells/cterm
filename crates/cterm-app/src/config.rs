@@ -64,6 +64,8 @@ pub struct GeneralConfig {
     /// TERM environment variable (default: xterm-256color)
     /// Common values: xterm-256color, xterm-direct, screen-256color
     pub term: Option<String>,
+    /// Show the Debug submenu under Help
+    pub show_debug_menu: bool,
 }
 
 impl Default for GeneralConfig {
@@ -77,6 +79,7 @@ impl Default for GeneralConfig {
             working_directory: None,
             env: HashMap::new(),
             term: None,
+            show_debug_menu: false,
         }
     }
 }

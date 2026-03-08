@@ -1,6 +1,18 @@
 //! Application menu system
 
-use gtk4::gio;
+use gtk4::{gio, glib};
+
+/// Helper to create a menu item with a shortcut label displayed in the menu.
+///
+/// Sets the "accel" attribute for display only. Actual key handling is done
+/// by our custom EventControllerKey; we do NOT call set_accels_for_action.
+fn menu_item(label: &str, action: &str, accel: Option<&str>) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(label), Some(action));
+    if let Some(accel) = accel {
+        item.set_attribute_value("accel", Some(&glib::Variant::from(accel)));
+    }
+    item
+}
 
 /// Create the application menu model
 pub fn create_menu_model() -> gio::Menu {
@@ -16,9 +28,17 @@ pub fn create_menu_model_with_options(show_debug: bool) -> gio::Menu {
 
     // File menu
     let file_menu = gio::Menu::new();
-    file_menu.append(Some("New Tab"), Some("win.new-tab"));
-    file_menu.append(Some("New Window"), Some("win.new-window"));
-    file_menu.append(Some("Quick Open Template..."), Some("win.quick-open"));
+    file_menu.append_item(&menu_item("New Tab", "win.new-tab", Some("<Ctrl><Shift>t")));
+    file_menu.append_item(&menu_item(
+        "New Window",
+        "win.new-window",
+        Some("<Ctrl><Shift>n"),
+    ));
+    file_menu.append_item(&menu_item(
+        "Quick Open Template...",
+        "win.quick-open",
+        Some("<Ctrl><Shift>o"),
+    ));
 
     // Docker submenu
     let docker_menu = gio::Menu::new();
@@ -26,24 +46,32 @@ pub fn create_menu_model_with_options(show_debug: bool) -> gio::Menu {
     file_menu.append_submenu(Some("Docker"), &docker_menu);
 
     file_menu.append(Some("Tab Templates..."), Some("win.tab-templates"));
-    file_menu.append(Some("Close Tab"), Some("win.close-tab"));
+    file_menu.append_item(&menu_item(
+        "Close Tab",
+        "win.close-tab",
+        Some("<Ctrl><Shift>w"),
+    ));
     file_menu.append(Some("Close Other Tabs"), Some("win.close-other-tabs"));
-    file_menu.append(Some("Quit"), Some("win.quit"));
+    file_menu.append_item(&menu_item("Quit", "win.quit", Some("<Ctrl><Shift>q")));
     menu.append_submenu(Some("File"), &file_menu);
 
     // Edit menu
     let edit_menu = gio::Menu::new();
-    edit_menu.append(Some("Copy"), Some("win.copy"));
+    edit_menu.append_item(&menu_item("Copy", "win.copy", Some("<Ctrl><Shift>c")));
     edit_menu.append(Some("Copy as HTML"), Some("win.copy-html"));
-    edit_menu.append(Some("Paste"), Some("win.paste"));
-    edit_menu.append(Some("Select All"), Some("win.select-all"));
+    edit_menu.append_item(&menu_item("Paste", "win.paste", Some("<Ctrl><Shift>v")));
+    edit_menu.append_item(&menu_item(
+        "Select All",
+        "win.select-all",
+        Some("<Ctrl><Shift>a"),
+    ));
     menu.append_submenu(Some("Edit"), &edit_menu);
 
     // Terminal menu
     let terminal_menu = gio::Menu::new();
     terminal_menu.append(Some("Set Title..."), Some("win.set-title"));
     terminal_menu.append(Some("Set Color..."), Some("win.set-color"));
-    terminal_menu.append(Some("Find..."), Some("win.find"));
+    terminal_menu.append_item(&menu_item("Find...", "win.find", Some("<Ctrl><Shift>f")));
 
     // Encoding submenu
     let encoding_menu = gio::Menu::new();
@@ -75,7 +103,11 @@ pub fn create_menu_model_with_options(show_debug: bool) -> gio::Menu {
     let tabs_menu = gio::Menu::new();
     tabs_menu.append(Some("Previous Tab"), Some("win.prev-tab"));
     tabs_menu.append(Some("Next Tab"), Some("win.next-tab"));
-    tabs_menu.append(Some("Next Alerted Tab"), Some("win.next-alerted-tab"));
+    tabs_menu.append_item(&menu_item(
+        "Next Alerted Tab",
+        "win.next-alerted-tab",
+        Some("<Ctrl><Shift>b"),
+    ));
     // Tab list section will be added dynamically
     menu.append_submenu(Some("Tabs"), &tabs_menu);
 

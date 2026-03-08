@@ -72,7 +72,10 @@ where
     let entry = Entry::new();
     entry.set_text(current_title);
     entry.set_hexpand(true);
+    entry.set_activates_default(true);
     content.append(&entry);
+
+    dialog.set_default_response(ResponseType::Ok);
 
     let entry_clone = entry.clone();
     dialog.connect_response(move |dialog, response| {
@@ -320,6 +323,7 @@ struct PreferencesWidgets {
     scrollback_spin: SpinButton,
     confirm_switch: Switch,
     copy_select_switch: Switch,
+    debug_menu_switch: Switch,
     // Appearance
     theme_combo: ComboBoxText,
     font_entry: Entry,
@@ -472,6 +476,7 @@ impl PreferencesWidgets {
         config.general.scrollback_lines = self.scrollback_spin.value() as usize;
         config.general.confirm_close_with_running = self.confirm_switch.is_active();
         config.general.copy_on_select = self.copy_select_switch.is_active();
+        config.general.show_debug_menu = self.debug_menu_switch.is_active();
 
         // Appearance
         if let Some(theme_id) = self.theme_combo.active_id() {
@@ -557,7 +562,7 @@ pub fn show_preferences_dialog(
     content.append(&notebook);
 
     // General tab
-    let (general_page, scrollback_spin, confirm_switch, copy_select_switch) =
+    let (general_page, scrollback_spin, confirm_switch, copy_select_switch, debug_menu_switch) =
         create_general_preferences(config);
     notebook.append_page(&general_page, Some(&Label::new(Some("General"))));
 
@@ -606,6 +611,7 @@ pub fn show_preferences_dialog(
         scrollback_spin,
         confirm_switch,
         copy_select_switch,
+        debug_menu_switch,
         theme_combo,
         font_entry,
         size_spin,
@@ -698,7 +704,7 @@ pub fn show_preferences_dialog(
     dialog.present();
 }
 
-fn create_general_preferences(config: &Config) -> (GtkBox, SpinButton, Switch, Switch) {
+fn create_general_preferences(config: &Config) -> (GtkBox, SpinButton, Switch, Switch, Switch) {
     let page = GtkBox::new(Orientation::Vertical, 12);
     page.set_margin_top(12);
     page.set_margin_bottom(12);
@@ -738,8 +744,24 @@ fn create_general_preferences(config: &Config) -> (GtkBox, SpinButton, Switch, S
     copy_select_switch.set_halign(Align::Start);
     grid.attach(&copy_select_switch, 1, 2, 1, 1);
 
+    // Show debug menu
+    let debug_menu_label = Label::new(Some("Show debug menu:"));
+    debug_menu_label.set_halign(Align::End);
+    grid.attach(&debug_menu_label, 0, 3, 1, 1);
+
+    let debug_menu_switch = Switch::new();
+    debug_menu_switch.set_active(config.general.show_debug_menu);
+    debug_menu_switch.set_halign(Align::Start);
+    grid.attach(&debug_menu_switch, 1, 3, 1, 1);
+
     page.append(&grid);
-    (page, scrollback_spin, confirm_switch, copy_select_switch)
+    (
+        page,
+        scrollback_spin,
+        confirm_switch,
+        copy_select_switch,
+        debug_menu_switch,
+    )
 }
 
 fn create_appearance_preferences(

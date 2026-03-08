@@ -40,6 +40,7 @@ struct TabInfo {
     bell_icon: Label,
     #[allow(dead_code)] // Kept to prevent button from being dropped
     close_button: Button,
+    context_popover: PopoverMenu,
 }
 
 impl TabBar {
@@ -205,6 +206,7 @@ impl TabBar {
             label,
             bell_icon,
             close_button,
+            context_popover: popover,
         });
 
         // Set as active if first tab
@@ -218,6 +220,7 @@ impl TabBar {
         let mut tabs = self.tabs.borrow_mut();
         if let Some(idx) = tabs.iter().position(|t| t.id == id) {
             let tab = tabs.remove(idx);
+            tab.context_popover.unparent();
             self.tabs_box.remove(&tab.button);
         }
 

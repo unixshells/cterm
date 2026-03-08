@@ -45,7 +45,6 @@ pub struct CtermWindow {
     tabs: Rc<RefCell<Vec<TabEntry>>>,
     next_tab_id: Rc<RefCell<u64>>,
     menu_bar: PopoverMenuBar,
-    debug_menu_shown: Rc<RefCell<bool>>,
     has_bell: Rc<RefCell<bool>>,
     notification_bar: NotificationBar,
     file_manager: Rc<RefCell<PendingFileManager>>,
@@ -116,8 +115,8 @@ impl CtermWindow {
         // Create the main container
         let main_box = GtkBox::new(Orientation::Vertical, 0);
 
-        // Create menu bar (debug menu hidden by default, shown when Shift is held)
-        let menu_model = menu::create_menu_model();
+        // Create menu bar
+        let menu_model = menu::create_menu_model_with_options(config.general.show_debug_menu);
         let menu_bar = PopoverMenuBar::from_model(Some(&menu_model));
         main_box.append(&menu_bar);
 
@@ -148,7 +147,6 @@ impl CtermWindow {
         // Create shortcut manager
         let shortcuts = ShortcutManager::from_config(&config.shortcuts);
 
-        let debug_menu_shown = Rc::new(RefCell::new(false));
         let has_bell = Rc::new(RefCell::new(false));
         let file_manager = Rc::new(RefCell::new(PendingFileManager::new()));
 
@@ -162,7 +160,6 @@ impl CtermWindow {
             tabs: Rc::new(RefCell::new(Vec::new())),
             next_tab_id: Rc::new(RefCell::new(0)),
             menu_bar,
-            debug_menu_shown,
             has_bell,
             notification_bar,
             file_manager,
@@ -177,9 +174,6 @@ impl CtermWindow {
 
         // Set up key event handling
         cterm_window.setup_key_handler();
-
-        // Set up Shift key tracking for debug menu
-        cterm_window.setup_debug_menu_handler();
 
         // Set up window focus handler to clear bell on focus
         cterm_window.setup_focus_handler();
@@ -215,6 +209,7 @@ impl CtermWindow {
         let theme = self.theme.clone();
         let tab_bar = self.tab_bar.clone();
         let has_bell = Rc::clone(&self.has_bell);
+        let menu_bar = self.menu_bar.clone();
 
         // File menu actions
         {
@@ -749,10 +744,12 @@ impl CtermWindow {
         {
             let window_clone = window.clone();
             let config = Rc::clone(&config);
+            let menu_bar_clone = menu_bar.clone();
             let action = gio::SimpleAction::new("preferences", None);
             action.connect_activate(move |_, _| {
                 let cfg = config.borrow().clone();
                 let config_for_save = Rc::clone(&config);
+                let menu_bar = menu_bar_clone.clone();
                 dialogs::show_preferences_dialog(&window_clone, &cfg, move |new_config| {
                     log::info!("Preferences saved");
                     // Save to disk
@@ -761,6 +758,8 @@ impl CtermWindow {
                     } else {
                         log::info!("Configuration saved to disk");
                     }
+                    // Rebuild menu bar to reflect debug menu preference
+                    menu::rebuild_menu_bar(&menu_bar, new_config.general.show_debug_menu);
                     // Update internal config state
                     *config_for_save.borrow_mut() = new_config;
                 });
@@ -1121,17 +1120,6 @@ impl CtermWindow {
             });
             window.add_action(&action);
         }
-
-        // Register accelerators so shortcuts appear in menus
-        if let Some(app) = window.application() {
-            app.set_accels_for_action("win.new-tab", &["<Ctrl><Shift>t"]);
-            app.set_accels_for_action("win.new-window", &["<Ctrl><Shift>n"]);
-            app.set_accels_for_action("win.close-tab", &["<Ctrl><Shift>w"]);
-            app.set_accels_for_action("win.copy", &["<Ctrl><Shift>c"]);
-            app.set_accels_for_action("win.paste", &["<Ctrl><Shift>v"]);
-            app.set_accels_for_action("win.find", &["<Ctrl><Shift>f"]);
-            app.set_accels_for_action("win.quit", &["<Ctrl><Shift>q"]);
-        }
     }
 
     /// Present the window and focus the terminal
@@ -1154,6 +1142,10 @@ impl CtermWindow {
     /// Set up keyboard event handler
     fn setup_key_handler(&self) {
         let key_controller = EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        // Disable IM on the window shortcut controller so IBus doesn't
+        // swallow Ctrl+Shift+letter events before key-pressed fires.
+        key_controller.set_im_context(None::<&gtk4::IMContext>);
 
         let shortcuts = self.shortcuts.clone();
         let notebook = self.notebook.clone();
@@ -1169,7 +1161,17 @@ impl CtermWindow {
 
         key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
             // Convert GTK modifiers to our modifiers
-            let modifiers = gtk_modifiers_to_modifiers(state);
+            let mut modifiers = gtk_modifiers_to_modifiers(state);
+
+            // GTK4 on X11 consumes Shift to produce uppercase keyvals,
+            // removing SHIFT_MASK from the state. Detect Shift from the keyval.
+            if !modifiers.contains(Modifiers::SHIFT) {
+                if let Some(c) = keyval.to_unicode() {
+                    if c.is_uppercase() {
+                        modifiers.insert(Modifiers::SHIFT);
+                    }
+                }
+            }
 
             // Convert keyval to our key code
             if let Some(key) = keyval_to_keycode(keyval) {
@@ -1350,75 +1352,6 @@ impl CtermWindow {
         self.window.add_controller(key_controller);
     }
 
-    /// Set up Shift key tracking for debug menu visibility
-    ///
-    /// The debug menu is hidden by default and only shown when Shift is held.
-    /// Menu model changes are deferred to idle callbacks to avoid modifying
-    /// the menu while GTK might be processing events (which could cause crashes).
-    fn setup_debug_menu_handler(&self) {
-        let debug_controller = EventControllerKey::new();
-
-        // Track whether an update is pending to avoid multiple queued updates
-        let update_pending = Rc::new(RefCell::new(false));
-
-        let menu_bar = self.menu_bar.clone();
-        let debug_menu_shown = Rc::clone(&self.debug_menu_shown);
-        let update_pending_press = Rc::clone(&update_pending);
-
-        // When Shift is pressed, queue showing the debug menu
-        debug_controller.connect_key_pressed(move |_, keyval, _keycode, _state| {
-            if keyval == gdk::Key::Shift_L || keyval == gdk::Key::Shift_R {
-                let shown = *debug_menu_shown.borrow();
-                let pending = *update_pending_press.borrow();
-
-                if !shown && !pending {
-                    *update_pending_press.borrow_mut() = true;
-                    *debug_menu_shown.borrow_mut() = true;
-
-                    let menu_bar = menu_bar.clone();
-                    let update_pending = Rc::clone(&update_pending_press);
-
-                    // Defer menu update to idle to avoid modifying during event processing
-                    glib::idle_add_local_once(move || {
-                        let new_menu = menu::create_menu_model_with_options(true);
-                        menu_bar.set_menu_model(Some(&new_menu));
-                        *update_pending.borrow_mut() = false;
-                    });
-                }
-            }
-            glib::Propagation::Proceed
-        });
-
-        let menu_bar = self.menu_bar.clone();
-        let debug_menu_shown = Rc::clone(&self.debug_menu_shown);
-        let update_pending_release = Rc::clone(&update_pending);
-
-        // When Shift is released, queue hiding the debug menu
-        debug_controller.connect_key_released(move |_, keyval, _keycode, _state| {
-            if keyval == gdk::Key::Shift_L || keyval == gdk::Key::Shift_R {
-                let shown = *debug_menu_shown.borrow();
-                let pending = *update_pending_release.borrow();
-
-                if shown && !pending {
-                    *update_pending_release.borrow_mut() = true;
-                    *debug_menu_shown.borrow_mut() = false;
-
-                    let menu_bar = menu_bar.clone();
-                    let update_pending = Rc::clone(&update_pending_release);
-
-                    // Defer menu update to idle to avoid modifying during event processing
-                    glib::idle_add_local_once(move || {
-                        let new_menu = menu::create_menu_model_with_options(false);
-                        menu_bar.set_menu_model(Some(&new_menu));
-                        *update_pending.borrow_mut() = false;
-                    });
-                }
-            }
-        });
-
-        self.window.add_controller(debug_controller);
-    }
-
     /// Set up window focus handler to clear bell when window becomes active
     /// and send focus events to the terminal (DECSET 1004)
     fn setup_focus_handler(&self) {
@@ -1466,11 +1399,14 @@ impl CtermWindow {
     fn setup_terminal_focus_restore(&self) {
         let focus_controller = EventControllerKey::new();
         focus_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        // Disable IM on the focus-restore controller too, so IBus doesn't
+        // consume key events before our handler runs.
+        focus_controller.set_im_context(None::<&gtk4::IMContext>);
 
         let notebook = self.notebook.clone();
         let tabs = Rc::clone(&self.tabs);
 
-        focus_controller.connect_key_pressed(move |controller, keyval, _keycode, state| {
+        focus_controller.connect_key_pressed(move |_controller, keyval, _keycode, state| {
             // Skip modifier keys and menu activation keys
             let is_modifier = matches!(
                 keyval,
@@ -1491,56 +1427,71 @@ impl CtermWindow {
                 return glib::Propagation::Proceed;
             }
 
-            // Check if focus is on the terminal
-            if let Some(widget) = controller.widget() {
-                if let Some(focus_widget) = widget.focus_child() {
-                    // The terminal drawing area has the "terminal" CSS class
-                    if !focus_widget.has_css_class("terminal") {
-                        // Focus is not on terminal - restore it and forward the key
-                        if let Some(page_idx) = notebook.current_page() {
-                            let tabs_ref = tabs.borrow();
-                            if let Some(tab) = tabs_ref.get(page_idx as usize) {
-                                // Grab focus
-                                tab.terminal.widget().grab_focus();
+            // Check if the terminal widget itself has focus.
+            // (focus_child() only returns the direct child, not the deeply
+            // nested DrawingArea, so we check has_focus() on the actual widget.)
+            let terminal_has_focus = notebook
+                .current_page()
+                .and_then(|idx| {
+                    let tabs_ref = tabs.borrow();
+                    tabs_ref
+                        .get(idx as usize)
+                        .map(|tab| tab.terminal.widget().has_focus())
+                })
+                .unwrap_or(false);
 
-                                // Forward the key to the terminal
-                                let has_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-                                let has_alt = state.contains(gdk::ModifierType::ALT_MASK);
+            if !terminal_has_focus {
+                // Focus is not on terminal - restore it and forward the key
+                if let Some(page_idx) = notebook.current_page() {
+                    let tabs_ref = tabs.borrow();
+                    if let Some(tab) = tabs_ref.get(page_idx as usize) {
+                        // Grab focus
+                        tab.terminal.widget().grab_focus();
 
-                                if let Some(c) = keyval.to_unicode() {
-                                    if has_ctrl && !has_alt {
-                                        // Ctrl+key - convert to control character
-                                        let ctrl_char = match c.to_ascii_lowercase() {
-                                            'a'..='z' => Some(
-                                                (c.to_ascii_lowercase() as u8 - b'a' + 1) as char,
-                                            ),
-                                            '[' | '3' => Some('\x1b'), // Escape
-                                            '\\' | '4' => Some('\x1c'),
-                                            ']' | '5' => Some('\x1d'),
-                                            '^' | '6' => Some('\x1e'),
-                                            '_' | '7' => Some('\x1f'),
-                                            '@' | '2' => Some('\x00'),
-                                            _ => None,
-                                        };
-                                        if let Some(ctrl) = ctrl_char {
-                                            tab.terminal.write_str(&ctrl.to_string());
-                                            tab.terminal.widget().queue_draw();
-                                            return glib::Propagation::Stop;
-                                        }
-                                    } else if !has_ctrl && !has_alt {
-                                        // Simple character - write directly
-                                        let mut s = [0u8; 4];
-                                        let s = c.encode_utf8(&mut s);
-                                        tab.terminal.write_str(s);
-                                        tab.terminal.widget().queue_draw();
-                                        return glib::Propagation::Stop;
+                        // Forward the key to the terminal
+                        let has_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                        let has_alt = state.contains(gdk::ModifierType::ALT_MASK);
+                        let has_shift = state.contains(gdk::ModifierType::SHIFT_MASK)
+                            || keyval.to_unicode().map_or(false, |c| c.is_uppercase());
+
+                        // Don't forward Ctrl+Shift combinations - those are
+                        // shortcuts handled by the key_controller.
+                        if has_ctrl && has_shift {
+                            return glib::Propagation::Proceed;
+                        }
+
+                        if let Some(c) = keyval.to_unicode() {
+                            if has_ctrl && !has_alt {
+                                // Ctrl+key - convert to control character
+                                let ctrl_char = match c.to_ascii_lowercase() {
+                                    'a'..='z' => {
+                                        Some((c.to_ascii_lowercase() as u8 - b'a' + 1) as char)
                                     }
+                                    '[' | '3' => Some('\x1b'), // Escape
+                                    '\\' | '4' => Some('\x1c'),
+                                    ']' | '5' => Some('\x1d'),
+                                    '^' | '6' => Some('\x1e'),
+                                    '_' | '7' => Some('\x1f'),
+                                    '@' | '2' => Some('\x00'),
+                                    _ => None,
+                                };
+                                if let Some(ctrl) = ctrl_char {
+                                    tab.terminal.write_str(&ctrl.to_string());
+                                    tab.terminal.widget().queue_draw();
+                                    return glib::Propagation::Stop;
                                 }
-
-                                // For special keys or Alt combinations, let the terminal's
-                                // key handler process it. Focus is now on the terminal.
+                            } else if !has_ctrl && !has_alt {
+                                // Simple character - write directly
+                                let mut s = [0u8; 4];
+                                let s = c.encode_utf8(&mut s);
+                                tab.terminal.write_str(s);
+                                tab.terminal.widget().queue_draw();
+                                return glib::Propagation::Stop;
                             }
                         }
+
+                        // For special keys or Alt combinations, let the terminal's
+                        // key handler process it. Focus is now on the terminal.
                     }
                 }
             }

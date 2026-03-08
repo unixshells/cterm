@@ -812,15 +812,36 @@ impl TerminalWidget {
 
         // Keyboard input
         let key_controller = EventControllerKey::new();
+        // Keep the default IM context (IBus/mozc) for Japanese input.
+        // The IM context gets key events first; if it handles them (e.g.
+        // composing Japanese), the `commit` signal fires instead of
+        // `key-pressed`. Keys the IM doesn't handle (Ctrl+letter, special
+        // keys) fall through to our `key-pressed` handler.
         let terminal_key = Arc::clone(&terminal);
+
+        // IM commit handler: receives text committed by the input method
+        // (both direct-mode ASCII and composed Japanese/CJK text).
+        let terminal_commit = Arc::clone(&terminal);
+        let drawing_area_commit = self.drawing_area.clone();
+        if let Some(im_ctx) = key_controller.im_context() {
+            im_ctx.connect_commit(move |_, text| {
+                let mut term = terminal_commit.lock();
+                if let Err(e) = term.write(text.as_bytes()) {
+                    log::error!("Failed to write IM text to PTY: {}", e);
+                }
+                drawing_area_commit.queue_draw();
+            });
+        }
 
         key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
             let modifiers = gtk_state_to_modifiers(state);
             let has_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let has_alt = state.contains(gdk::ModifierType::ALT_MASK);
-            let has_shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
-            // Let Ctrl+Shift combinations pass through to window shortcuts
+            // Ctrl+Shift combinations are handled by the window's CAPTURE
+            // controller (shortcuts). If they reach here, just ignore.
+            let has_shift = state.contains(gdk::ModifierType::SHIFT_MASK)
+                || keyval.to_unicode().map_or(false, |c| c.is_uppercase());
             if has_ctrl && has_shift {
                 return glib::Propagation::Proceed;
             }
@@ -874,7 +895,8 @@ impl TerminalWidget {
                     return glib::Propagation::Stop;
                 }
 
-                // Regular character (no Ctrl/Alt)
+                // Regular character without Ctrl/Alt: if the IM context
+                // didn't handle it (e.g. IM is off), write directly.
                 if !has_ctrl && !has_alt {
                     let mut term = terminal_key.lock();
                     let mut buf = [0u8; 4];
