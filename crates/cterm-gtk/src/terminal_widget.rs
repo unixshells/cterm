@@ -850,7 +850,7 @@ impl TerminalWidget {
             // Ctrl+Shift combinations are handled by the window's CAPTURE
             // controller (shortcuts). If they reach here, just ignore.
             let has_shift = state.contains(gdk::ModifierType::SHIFT_MASK)
-                || keyval.to_unicode().map_or(false, |c| c.is_uppercase());
+                || keyval.to_unicode().is_some_and(|c| c.is_uppercase());
             if has_ctrl && has_shift {
                 return glib::Propagation::Proceed;
             }

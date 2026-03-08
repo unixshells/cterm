@@ -1452,7 +1452,7 @@ impl CtermWindow {
                         let has_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                         let has_alt = state.contains(gdk::ModifierType::ALT_MASK);
                         let has_shift = state.contains(gdk::ModifierType::SHIFT_MASK)
-                            || keyval.to_unicode().map_or(false, |c| c.is_uppercase());
+                            || keyval.to_unicode().is_some_and(|c| c.is_uppercase());
 
                         // Don't forward Ctrl+Shift combinations - those are
                         // shortcuts handled by the key_controller.
