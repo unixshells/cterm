@@ -35,6 +35,14 @@ type TitleCallback = Rc<RefCell<Option<Box<dyn Fn(&str)>>>>;
 /// Callback type for file transfer events
 type FileTransferCallback = Rc<RefCell<Option<Box<dyn Fn(cterm_core::FileTransferOperation)>>>>;
 
+/// Preedit (input method composition) state
+#[derive(Default, Clone)]
+struct PreeditState {
+    text: String,
+    cursor_pos: i32,
+    active: bool,
+}
+
 /// Terminal widget wrapping GTK drawing area
 pub struct TerminalWidget {
     drawing_area: DrawingArea,
@@ -46,6 +54,8 @@ pub struct TerminalWidget {
     cell_dims: Rc<RefCell<CellDimensions>>,
     /// Optional background color override (from template)
     background_override: Rc<RefCell<Option<cterm_core::color::Rgb>>>,
+    /// Input method preedit (composition) state
+    preedit: Rc<RefCell<PreeditState>>,
     on_exit: EventCallback,
     on_bell: EventCallback,
     on_title_change: TitleCallback,
@@ -115,6 +125,7 @@ impl TerminalWidget {
             on_exit: Rc::new(RefCell::new(None)),
             on_bell: Rc::new(RefCell::new(None)),
             on_title_change: Rc::new(RefCell::new(None)),
+            preedit: Rc::new(RefCell::new(PreeditState::default())),
             on_file_transfer: Rc::new(RefCell::new(None)),
         };
 
@@ -207,6 +218,7 @@ impl TerminalWidget {
             on_exit: Rc::new(RefCell::new(None)),
             on_bell: Rc::new(RefCell::new(None)),
             on_title_change: Rc::new(RefCell::new(None)),
+            preedit: Rc::new(RefCell::new(PreeditState::default())),
             on_file_transfer: Rc::new(RefCell::new(None)),
         };
 
@@ -296,6 +308,7 @@ impl TerminalWidget {
             on_exit: Rc::new(RefCell::new(None)),
             on_bell: Rc::new(RefCell::new(None)),
             on_title_change: Rc::new(RefCell::new(None)),
+            preedit: Rc::new(RefCell::new(PreeditState::default())),
             on_file_transfer: Rc::new(RefCell::new(None)),
         };
 
@@ -363,6 +376,7 @@ impl TerminalWidget {
             on_exit: Rc::new(RefCell::new(None)),
             on_bell: Rc::new(RefCell::new(None)),
             on_title_change: Rc::new(RefCell::new(None)),
+            preedit: Rc::new(RefCell::new(PreeditState::default())),
             on_file_transfer: Rc::new(RefCell::new(None)),
         };
 
@@ -787,12 +801,14 @@ impl TerminalWidget {
         let font_size = Rc::clone(&self.font_size);
         let cell_dims = Rc::clone(&self.cell_dims);
         let background_override = Rc::clone(&self.background_override);
+        let preedit = Rc::clone(&self.preedit);
 
         self.drawing_area
             .set_draw_func(move |_area, cr, _width, _height| {
                 let font_size = *font_size.borrow();
                 let dims = *cell_dims.borrow();
                 let bg_override = *background_override.borrow();
+                let preedit_state = preedit.borrow().clone();
                 draw_terminal(
                     cr,
                     &terminal,
@@ -801,6 +817,7 @@ impl TerminalWidget {
                     font_size,
                     dims,
                     bg_override,
+                    &preedit_state,
                 );
             });
     }
@@ -810,31 +827,69 @@ impl TerminalWidget {
         let terminal = Arc::clone(&self.terminal);
         let cell_dims = Rc::clone(&self.cell_dims);
 
-        // Keyboard input
+        // Keyboard input — we manage the IM context explicitly so that
+        // Japanese/CJK composition works reliably with IBus/Fcitx.
         let key_controller = EventControllerKey::new();
-        // Keep the default IM context (IBus/mozc) for Japanese input.
-        // The IM context gets key events first; if it handles them (e.g.
-        // composing Japanese), the `commit` signal fires instead of
-        // `key-pressed`. Keys the IM doesn't handle (Ctrl+letter, special
-        // keys) fall through to our `key-pressed` handler.
-        let terminal_key = Arc::clone(&terminal);
+        // Disable the controller's built-in IM handling; we call
+        // filter_keypress ourselves so we can control the priority.
+        key_controller.set_im_context(None::<&gtk4::IMContext>);
 
-        // IM commit handler: receives text committed by the input method
-        // (both direct-mode ASCII and composed Japanese/CJK text).
+        // Create our own IM context
+        let im_context = gtk4::IMMulticontext::new();
+        im_context.set_client_widget(Some(&self.drawing_area));
+
+        // IM commit: receives confirmed text from the input method
         let terminal_commit = Arc::clone(&terminal);
         let drawing_area_commit = self.drawing_area.clone();
-        if let Some(im_ctx) = key_controller.im_context() {
-            im_ctx.connect_commit(move |_, text| {
-                let mut term = terminal_commit.lock();
-                term.scroll_viewport_to_bottom();
-                if let Err(e) = term.write(text.as_bytes()) {
-                    log::error!("Failed to write IM text to PTY: {}", e);
-                }
-                drawing_area_commit.queue_draw();
-            });
+        im_context.connect_commit(move |_, text| {
+            let mut term = terminal_commit.lock();
+            term.scroll_viewport_to_bottom();
+            if let Err(e) = term.write(text.as_bytes()) {
+                log::error!("Failed to write IM text to PTY: {}", e);
+            }
+            drawing_area_commit.queue_draw();
+        });
+
+        // IM preedit: display composition text while the user is typing
+        let preedit_changed = Rc::clone(&self.preedit);
+        let drawing_area_preedit = self.drawing_area.clone();
+        im_context.connect_preedit_changed(move |im| {
+            let (text, _attrs, cursor_pos) = im.preedit_string();
+            let mut state = preedit_changed.borrow_mut();
+            state.text = text.to_string();
+            state.cursor_pos = cursor_pos;
+            state.active = !state.text.is_empty();
+            drawing_area_preedit.queue_draw();
+        });
+
+        let preedit_end = Rc::clone(&self.preedit);
+        let drawing_area_preedit_end = self.drawing_area.clone();
+        im_context.connect_preedit_end(move |_| {
+            let mut state = preedit_end.borrow_mut();
+            state.text.clear();
+            state.cursor_pos = 0;
+            state.active = false;
+            drawing_area_preedit_end.queue_draw();
+        });
+
+        // Manage IM focus when the DrawingArea gains/loses keyboard focus
+        let im_focus = im_context.clone();
+        self.drawing_area.connect_has_focus_notify(move |widget| {
+            if widget.has_focus() {
+                im_focus.focus_in();
+            } else {
+                im_focus.focus_out();
+            }
+        });
+        // If the drawing area already has focus, activate IM immediately
+        if self.drawing_area.has_focus() {
+            im_context.focus_in();
         }
 
-        key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
+        // Key press handler
+        let terminal_key = Arc::clone(&terminal);
+        let im_key = im_context.clone();
+        key_controller.connect_key_pressed(move |controller, keyval, _keycode, state| {
             // Reset scroll to bottom on any user input
             {
                 let mut term = terminal_key.lock();
@@ -843,17 +898,25 @@ impl TerminalWidget {
                 }
             }
 
-            let modifiers = gtk_state_to_modifiers(state);
-            let has_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-            let has_alt = state.contains(gdk::ModifierType::ALT_MASK);
-
             // Ctrl+Shift combinations are handled by the window's CAPTURE
             // controller (shortcuts). If they reach here, just ignore.
+            let has_ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let has_shift = state.contains(gdk::ModifierType::SHIFT_MASK)
                 || keyval.to_unicode().is_some_and(|c| c.is_uppercase());
             if has_ctrl && has_shift {
                 return glib::Propagation::Proceed;
             }
+
+            // Let the IM context try to handle the key first.
+            // This handles Ctrl+Space (IBus trigger), Japanese composition, etc.
+            if let Some(event) = controller.current_event() {
+                if im_key.filter_keypress(&event) {
+                    return glib::Propagation::Stop;
+                }
+            }
+
+            let modifiers = gtk_state_to_modifiers(state);
+            let has_alt = state.contains(gdk::ModifierType::ALT_MASK);
 
             // Handle special keys (arrows, function keys, etc.)
             if let Some(key) = keyval_to_key(keyval) {
@@ -904,8 +967,8 @@ impl TerminalWidget {
                     return glib::Propagation::Stop;
                 }
 
-                // Regular character without Ctrl/Alt: if the IM context
-                // didn't handle it (e.g. IM is off), write directly.
+                // Regular character without Ctrl/Alt: IM didn't handle it,
+                // so write directly to the PTY.
                 if !has_ctrl && !has_alt {
                     let mut term = terminal_key.lock();
                     let mut buf = [0u8; 4];
@@ -918,6 +981,14 @@ impl TerminalWidget {
             }
 
             glib::Propagation::Proceed
+        });
+
+        // Key release handler — IM contexts need release events too
+        let im_release = im_context.clone();
+        key_controller.connect_key_released(move |controller, _keyval, _keycode, _state| {
+            if let Some(event) = controller.current_event() {
+                im_release.filter_keypress(&event);
+            }
         });
 
         self.drawing_area.add_controller(key_controller);
@@ -1410,6 +1481,7 @@ fn draw_terminal(
     font_size: f64,
     cell_dims: CellDimensions,
     background_override: Option<cterm_core::color::Rgb>,
+    preedit: &PreeditState,
 ) {
     let term = terminal.lock();
     let screen = term.screen();
@@ -1584,6 +1656,33 @@ fn draw_terminal(
                 cr.fill().ok();
             }
         }
+    }
+
+    // Draw IM preedit (composition) text at the cursor position
+    if preedit.active && !preedit.text.is_empty() && scroll_offset == 0 {
+        let cursor = &screen.cursor;
+        let x = cursor.col as f64 * cell_width;
+        let y = cursor.row as f64 * cell_height;
+
+        // Draw preedit background
+        let preedit_width = preedit.text.chars().count() as f64 * cell_width;
+        let (r, g, b) = palette.foreground.to_f64();
+        cr.set_source_rgb(r, g, b);
+        cr.rectangle(x, y, preedit_width, cell_height);
+        cr.fill().ok();
+
+        // Draw preedit text
+        let (r, g, b) = palette.background.to_f64();
+        cr.set_source_rgb(r, g, b);
+        layout.set_text(&preedit.text);
+        cr.move_to(x, y);
+        pangocairo::functions::show_layout(cr, &layout);
+
+        // Draw underline to indicate composition
+        let (r, g, b) = palette.foreground.to_f64();
+        cr.set_source_rgb(r, g, b);
+        cr.rectangle(x, y + cell_height - 1.0, preedit_width, 1.0);
+        cr.fill().ok();
     }
 }
 
