@@ -809,16 +809,13 @@ impl TerminalWidget {
                 let dims = *cell_dims.borrow();
                 let bg_override = *background_override.borrow();
                 let preedit_state = preedit.borrow().clone();
-                draw_terminal(
-                    cr,
-                    &terminal,
-                    &theme,
-                    &font_family,
+                let render_config = RenderConfig {
+                    font_family: &font_family,
                     font_size,
-                    dims,
-                    bg_override,
-                    &preedit_state,
-                );
+                    cell_dims: dims,
+                    background_override: bg_override,
+                };
+                draw_terminal(cr, &terminal, &theme, &render_config, &preedit_state);
             });
     }
 
@@ -1472,16 +1469,21 @@ enum PtyMessage {
     Exited,
 }
 
+/// Rendering parameters for draw_terminal
+struct RenderConfig<'a> {
+    font_family: &'a str,
+    font_size: f64,
+    cell_dims: CellDimensions,
+    background_override: Option<cterm_core::color::Rgb>,
+}
+
 /// Draw the terminal contents
 #[allow(clippy::too_many_arguments)]
 fn draw_terminal(
     cr: &cairo::Context,
     terminal: &Arc<Mutex<Terminal>>,
     theme: &Theme,
-    font_family: &str,
-    font_size: f64,
-    cell_dims: CellDimensions,
-    background_override: Option<cterm_core::color::Rgb>,
+    config: &RenderConfig<'_>,
     preedit: &PreeditState,
 ) {
     let term = terminal.lock();
@@ -1489,7 +1491,10 @@ fn draw_terminal(
     let palette = &theme.colors;
 
     // Draw background (use override if set, otherwise use theme)
-    let bg = background_override.as_ref().unwrap_or(&palette.background);
+    let bg = config
+        .background_override
+        .as_ref()
+        .unwrap_or(&palette.background);
     let (r, g, b) = bg.to_f64();
     cr.set_source_rgb(r, g, b);
     cr.paint().ok();
@@ -1499,12 +1504,15 @@ fn draw_terminal(
     let layout = pango::Layout::new(&pango_context);
 
     // Set font
-    let font_desc = pango::FontDescription::from_string(&format!("{} {}", font_family, font_size));
+    let font_desc = pango::FontDescription::from_string(&format!(
+        "{} {}",
+        config.font_family, config.font_size
+    ));
     layout.set_font_description(Some(&font_desc));
 
     // Use pre-calculated cell dimensions
-    let cell_width = cell_dims.width;
-    let cell_height = cell_dims.height;
+    let cell_width = config.cell_dims.width;
+    let cell_height = config.cell_dims.height;
 
     // Draw cells - use absolute line indices to render scrollback content
     let grid = screen.grid();
