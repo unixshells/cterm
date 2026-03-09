@@ -193,6 +193,9 @@ impl CtermWindow {
         // Set up tab bar callbacks
         cterm_window.setup_tab_bar_callbacks();
 
+        // Update window title when switching tabs
+        cterm_window.setup_tab_switch_handler();
+
         // Set up close request handler for process confirmation
         cterm_window.setup_close_request_handler();
 
@@ -475,6 +478,7 @@ impl CtermWindow {
                 let tabs_clone = Rc::clone(&tabs);
                 let notebook_clone = notebook.clone();
                 let tab_bar_clone = tab_bar.clone();
+                let window_title = window_clone.clone();
                 dialogs::show_set_title_dialog(&window_clone, &current_title, move |new_title| {
                     if let Some(page_idx) = notebook_clone.current_page() {
                         let mut tabs = tabs_clone.borrow_mut();
@@ -482,6 +486,7 @@ impl CtermWindow {
                             tab.title = new_title.clone();
                             tab.title_locked = true; // Lock title so OSC won't override
                             tab_bar_clone.set_title(tab.id, &new_title);
+                            window_title.set_title(Some(&new_title));
                         }
                     }
                 });
@@ -1687,12 +1692,14 @@ impl CtermWindow {
                 };
                 let tabs_clone = Rc::clone(&tabs);
                 let tab_bar_clone = tab_bar.clone();
+                let window_clone = window.clone();
                 dialogs::show_set_title_dialog(&window, &current_title, move |new_title| {
                     let mut tabs = tabs_clone.borrow_mut();
                     if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
                         tab.title = new_title.clone();
                         tab.title_locked = true;
                         tab_bar_clone.set_title(tab_id, &new_title);
+                        window_clone.set_title(Some(&new_title));
                     }
                 });
             });
@@ -1803,6 +1810,23 @@ impl CtermWindow {
             &self.notification_bar,
             cwd,
         );
+    }
+
+    /// Update window title when switching tabs
+    fn setup_tab_switch_handler(&self) {
+        let tabs = Rc::clone(&self.tabs);
+        let window = self.window.clone();
+        let tab_bar = self.tab_bar.clone();
+        let has_bell = Rc::clone(&self.has_bell);
+        self.notebook.connect_switch_page(move |_, _, page_num| {
+            let tabs = tabs.borrow();
+            if let Some(tab) = tabs.get(page_num as usize) {
+                window.set_title(Some(&tab.title));
+                tab_bar.set_active(tab.id);
+                tab_bar.clear_bell(tab.id);
+                *has_bell.borrow_mut() = false;
+            }
+        });
     }
 }
 
