@@ -132,6 +132,14 @@ impl Terminal {
         self.pty = Some(pty);
     }
 
+    /// Take the PTY out of the terminal, returning it if present.
+    ///
+    /// This is used when closing a tab to ensure the PTY is dropped promptly,
+    /// which closes the master FD and unblocks any background read threads.
+    pub fn take_pty(&mut self) -> Option<Pty> {
+        self.pty.take()
+    }
+
     /// Restore the screen state (for crash recovery)
     ///
     /// Replaces the current screen with the provided one, preserving the PTY.

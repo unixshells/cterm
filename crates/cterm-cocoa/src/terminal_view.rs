@@ -151,6 +151,12 @@ define_class!(
                 // Unregister PTY from watchdog when view is removed
                 #[cfg(unix)]
                 self.unregister_pty_from_watchdog();
+
+                // Take and drop the PTY to close the master FD.
+                // This causes the background read thread to get an error/EOF and exit,
+                // which drops its Arc<Mutex<Terminal>> and allows full cleanup.
+                // Without this, the read thread blocks forever on read() and the FD leaks.
+                let _pty = self.ivars().terminal.lock().take_pty();
             }
         }
 
