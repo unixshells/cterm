@@ -53,24 +53,20 @@ pub async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
     let shutdown_notify = Arc::new(Notify::new());
     let service = TerminalServiceImpl::new(session_manager.clone(), Arc::clone(&shutdown_notify));
 
-    // Spawn periodic dead session cleanup task.
-    // Also auto-shuts down the daemon when all sessions have been destroyed/exited.
+    // Spawn periodic dead session cleanup task
     {
         let sm = session_manager.clone();
         let shutdown = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
-            // Track whether we've ever had sessions (don't shut down before the first one)
-            let mut had_sessions = false;
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                sm.cleanup_dead_sessions();
-
-                let count = sm.session_count();
-                if count > 0 {
-                    had_sessions = true;
-                } else if had_sessions {
-                    log::info!("All sessions ended, shutting down daemon");
+                let cleaned = sm.cleanup_dead_sessions();
+                // If dead sessions were cleaned and none remain, check for auto-shutdown.
+                // The stream drop callback handles the connected-client check;
+                // this handles the case where sessions exited but no streams were active.
+                if cleaned > 0 && sm.session_count() == 0 && sm.had_sessions() {
+                    log::info!("All sessions exited, shutting down daemon");
                     shutdown.notify_one();
                     break;
                 }

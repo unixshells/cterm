@@ -5,6 +5,7 @@ use crate::session::{generate_session_id, SessionState};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Thread-safe manager for terminal sessions
@@ -12,6 +13,8 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<SessionState>>>,
     /// Default scrollback lines for new sessions
     scrollback_lines: usize,
+    /// Whether at least one session has ever been created
+    had_sessions: AtomicBool,
 }
 
 impl SessionManager {
@@ -25,6 +28,7 @@ impl SessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             scrollback_lines,
+            had_sessions: AtomicBool::new(false),
         }
     }
 
@@ -63,6 +67,7 @@ impl SessionManager {
         let state = state.start_reader()?;
 
         // Store the session
+        self.had_sessions.store(true, Ordering::Relaxed);
         self.sessions.write().insert(id, Arc::clone(&state));
 
         log::info!("Created session {} ({}x{})", state.id, cols, rows);
@@ -110,8 +115,13 @@ impl SessionManager {
         self.sessions.read().len()
     }
 
-    /// Clean up dead sessions
-    pub fn cleanup_dead_sessions(&self) {
+    /// Whether at least one session has ever been created
+    pub fn had_sessions(&self) -> bool {
+        self.had_sessions.load(Ordering::Relaxed)
+    }
+
+    /// Clean up dead sessions, returns the number of sessions removed
+    pub fn cleanup_dead_sessions(&self) -> usize {
         let mut sessions = self.sessions.write();
         let dead_ids: Vec<String> = sessions
             .iter()
@@ -119,10 +129,12 @@ impl SessionManager {
             .map(|(id, _)| id.clone())
             .collect();
 
+        let count = dead_ids.len();
         for id in dead_ids {
             sessions.remove(&id);
             log::info!("Cleaned up dead session {}", id);
         }
+        count
     }
 }
 

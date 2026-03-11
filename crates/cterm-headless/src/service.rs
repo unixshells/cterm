@@ -31,6 +31,8 @@ pub struct TerminalServiceImpl {
     start_time: Instant,
     /// Number of clients that have performed a handshake
     client_count: AtomicU32,
+    /// Number of active output streams (proxy for connected clients)
+    active_streams: Arc<AtomicU32>,
 }
 
 impl TerminalServiceImpl {
@@ -42,6 +44,7 @@ impl TerminalServiceImpl {
             daemon_id: uuid::Uuid::new_v4().to_string(),
             start_time: Instant::now(),
             client_count: AtomicU32::new(0),
+            active_streams: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -219,10 +222,14 @@ impl TerminalService for TerminalServiceImpl {
             .map_err(Status::from)?;
 
         session.attach();
+        self.active_streams.fetch_add(1, Ordering::Relaxed);
 
         let rx = session.subscribe_output();
         let session_id = req.session_id.clone();
         let session_detach = session.clone();
+        let active_streams = Arc::clone(&self.active_streams);
+        let session_manager = Arc::clone(&self.session_manager);
+        let shutdown_notify = Arc::clone(&self.shutdown_notify);
         let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
             Ok(data) => Some(Ok(OutputChunk {
                 data: data.data,
@@ -239,9 +246,14 @@ impl TerminalService for TerminalServiceImpl {
             }
         });
 
-        // Wrap the stream to detach when the client disconnects
+        // Wrap the stream to detach and check auto-shutdown when the client disconnects
         let stream = StreamNotify::new(stream, move || {
             session_detach.detach();
+            let prev = active_streams.fetch_sub(1, Ordering::Relaxed);
+            if prev == 1 && session_manager.session_count() == 0 && session_manager.had_sessions() {
+                log::info!("No sessions and no connected clients, shutting down daemon");
+                shutdown_notify.notify_one();
+            }
         });
 
         Ok(Response::new(Box::pin(stream)))
