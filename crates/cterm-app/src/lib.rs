@@ -7,6 +7,7 @@
 pub mod config;
 #[cfg(unix)]
 pub mod crash_recovery;
+pub mod daemon_session;
 pub mod docker;
 pub mod file_drop;
 pub mod file_transfer;
@@ -28,6 +29,7 @@ pub use crash_recovery::{
     run_watchdog, unregister_fd_with_watchdog, write_crash_state, CrashState, RecoveredFd,
     WatchdogError,
 };
+pub use daemon_session::{DaemonTab, DaemonTabError};
 pub use git_sync::{
     clone_repo, get_directory_remote_url, get_remote_url, get_sync_status, init_with_remote,
     is_git_repo, prepare_working_directory, pull_with_conflict_resolution, GitError, InitResult,

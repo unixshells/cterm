@@ -30,11 +30,15 @@ pub struct TerminalConfig {
     pub pty: PtyConfig,
 }
 
+/// Callback for writing data when no PTY is present (e.g., daemon mode)
+pub type WriteFn = Box<dyn Fn(&[u8]) -> Result<(), PtyError> + Send + Sync>;
+
 /// Terminal instance managing screen, parser, and PTY
 pub struct Terminal {
     screen: Screen,
     parser: Parser,
     pty: Option<Pty>,
+    write_fn: Option<WriteFn>,
     last_title: String,
 }
 
@@ -45,6 +49,7 @@ impl Terminal {
             screen: Screen::new(cols, rows, config),
             parser: Parser::new(),
             pty: None,
+            write_fn: None,
             last_title: String::new(),
         }
     }
@@ -58,6 +63,7 @@ impl Terminal {
             screen,
             parser: Parser::new(),
             pty: Some(pty),
+            write_fn: None,
             last_title: title,
         }
     }
@@ -82,6 +88,7 @@ impl Terminal {
             screen,
             parser: Parser::new(),
             pty: Some(pty),
+            write_fn: None,
             last_title: title,
         }
     }
@@ -103,6 +110,7 @@ impl Terminal {
             screen: Screen::new(cols, rows, screen_config),
             parser: Parser::new(),
             pty: Some(pty),
+            write_fn: None,
             last_title: String::new(),
         })
     }
@@ -130,6 +138,11 @@ impl Terminal {
     /// Set the PTY for this terminal
     pub fn set_pty(&mut self, pty: Pty) {
         self.pty = Some(pty);
+    }
+
+    /// Set a write callback for daemon/remote mode (used instead of PTY)
+    pub fn set_write_fn(&mut self, write_fn: WriteFn) {
+        self.write_fn = Some(write_fn);
     }
 
     /// Take the PTY out of the terminal, returning it if present.
@@ -195,6 +208,8 @@ impl Terminal {
     pub fn write(&mut self, data: &[u8]) -> Result<(), PtyError> {
         if let Some(ref mut pty) = self.pty {
             pty.write(data)?;
+        } else if let Some(ref write_fn) = self.write_fn {
+            write_fn(data)?;
         }
         Ok(())
     }

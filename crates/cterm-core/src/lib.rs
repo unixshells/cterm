@@ -37,4 +37,4 @@ pub use screen::{
 };
 pub use sixel::{SixelDecoder, SixelImage};
 pub use streaming_file::{StreamingFileData, StreamingFileReceiver, StreamingFileResult};
-pub use term::Terminal;
+pub use term::{Terminal, WriteFn};

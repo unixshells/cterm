@@ -393,7 +393,9 @@ version = "0.0.15"
 dependencies = [
  "base64",
  "bincode",
+ "cterm-client",
  "cterm-core",
+ "cterm-proto",
  "cterm-ui",
  "directories",
  "env_logger",
@@ -411,6 +413,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "toml 0.8.23",
  "winapi",
 ]
