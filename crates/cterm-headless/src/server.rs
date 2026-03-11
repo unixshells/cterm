@@ -75,7 +75,25 @@ pub async fn run_server(
                             s.scrollback_lines,
                         )
                     } {
-                        Ok(_) => {}
+                        Ok(session) => {
+                            // Apply screen snapshot if available
+                            if !s.screen_snapshot.is_empty() {
+                                if let Some(screen_data) =
+                                    crate::relaunch::decode_screen_snapshot(&s.screen_snapshot)
+                                {
+                                    session.with_terminal_mut(|term| {
+                                        cterm_proto::convert::screen::apply_screen_snapshot(
+                                            term,
+                                            &screen_data,
+                                        );
+                                    });
+                                    log::info!(
+                                        "Applied screen snapshot for session {}",
+                                        s.session_id
+                                    );
+                                }
+                            }
+                        }
                         Err(e) => {
                             log::error!(
                                 "Failed to restore session {} (fd={}, pid={}): {}",

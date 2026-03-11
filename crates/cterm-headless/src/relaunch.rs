@@ -8,6 +8,8 @@
 //!    preserved FDs, and resumes serving on the same socket path.
 
 use crate::session::SessionManager;
+use base64::Engine;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -26,6 +28,8 @@ pub struct RelaunchSessionState {
     pub custom_title: String,
     /// Scrollback lines setting
     pub scrollback_lines: usize,
+    /// Screen snapshot as base64-encoded protobuf (GetScreenResponse)
+    pub screen_snapshot: String,
 }
 
 /// Full relaunch state written to the temp file
@@ -38,21 +42,30 @@ pub struct RelaunchState {
 
 /// Collect relaunch state from the session manager.
 ///
-/// This extracts the raw FD, child PID, dimensions, and custom title
-/// from each running session.
+/// This extracts the raw FD, child PID, dimensions, custom title,
+/// and a full screen snapshot (including scrollback) from each session.
 pub fn collect_relaunch_state(
     session_manager: &Arc<SessionManager>,
     socket_path: &str,
     scrollback_lines: usize,
 ) -> RelaunchState {
+    use cterm_proto::convert::screen::screen_to_proto;
+
     let sessions = session_manager.list_sessions();
     let mut session_states = Vec::new();
 
     for session in &sessions {
-        let (fd, pid) = session.with_terminal(|term| {
+        let (fd, pid, screen_snapshot) = session.with_terminal(|term| {
             let fd = term.pty().map(|p| p.raw_fd()).unwrap_or(-1);
             let pid = term.child_pid().unwrap_or(-1);
-            (fd, pid)
+
+            // Capture full screen state including scrollback
+            let screen_proto = screen_to_proto(term.screen(), true);
+            let mut buf = Vec::new();
+            screen_proto.encode(&mut buf).ok();
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);
+
+            (fd, pid, encoded)
         });
 
         if fd < 0 || pid < 0 {
@@ -76,6 +89,7 @@ pub fn collect_relaunch_state(
             rows,
             custom_title,
             scrollback_lines,
+            screen_snapshot,
         });
     }
 
@@ -84,6 +98,14 @@ pub fn collect_relaunch_state(
         socket_path: socket_path.to_string(),
         scrollback_lines,
     }
+}
+
+/// Decode a screen snapshot from base64-encoded protobuf.
+pub fn decode_screen_snapshot(encoded: &str) -> Option<cterm_proto::proto::GetScreenResponse> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    cterm_proto::proto::GetScreenResponse::decode(bytes.as_slice()).ok()
 }
 
 /// Write relaunch state to a temp file and return the path.

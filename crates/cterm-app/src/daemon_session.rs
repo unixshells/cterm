@@ -204,76 +204,7 @@ pub fn apply_screen_snapshot(
     terminal: &mut Terminal,
     screen_data: &cterm_proto::proto::GetScreenResponse,
 ) {
-    use cterm_proto::convert::color::proto_to_color;
-    use cterm_proto::convert::screen::proto_to_attrs;
-
-    let screen = terminal.screen_mut();
-
-    // Resize if needed
-    if screen_data.cols > 0 && screen_data.rows > 0 {
-        screen.resize(screen_data.cols as usize, screen_data.rows as usize);
-    }
-
-    // Restore visible rows
-    for (row_idx, row) in screen_data.visible_rows.iter().enumerate() {
-        for (col_idx, cell) in row.cells.iter().enumerate() {
-            if let Some(grid_cell) = screen.grid_mut().get_mut(row_idx, col_idx) {
-                grid_cell.c = cell.char.chars().next().unwrap_or(' ');
-                if let Some(fg) = &cell.fg {
-                    grid_cell.fg = proto_to_color(fg);
-                }
-                if let Some(bg) = &cell.bg {
-                    grid_cell.bg = proto_to_color(bg);
-                }
-                if let Some(attrs) = &cell.attrs {
-                    grid_cell.attrs = proto_to_attrs(attrs);
-                }
-            }
-        }
-    }
-
-    // Restore scrollback
-    if !screen_data.scrollback.is_empty() {
-        use cterm_core::grid::Row;
-        for proto_row in &screen_data.scrollback {
-            let mut row = Row::new(screen_data.cols as usize);
-            for (col_idx, cell) in proto_row.cells.iter().enumerate() {
-                if let Some(grid_cell) = row.get_mut(col_idx) {
-                    grid_cell.c = cell.char.chars().next().unwrap_or(' ');
-                    if let Some(fg) = &cell.fg {
-                        grid_cell.fg = proto_to_color(fg);
-                    }
-                    if let Some(bg) = &cell.bg {
-                        grid_cell.bg = proto_to_color(bg);
-                    }
-                    if let Some(attrs) = &cell.attrs {
-                        grid_cell.attrs = proto_to_attrs(attrs);
-                    }
-                }
-            }
-            screen.scrollback_mut().push_back(row);
-        }
-    }
-
-    // Restore cursor
-    if let Some(cursor) = &screen_data.cursor {
-        screen.cursor.row = cursor.row as usize;
-        screen.cursor.col = cursor.col as usize;
-        screen.modes.show_cursor = cursor.visible;
-    }
-
-    // Restore title
-    if !screen_data.title.is_empty() {
-        screen.title = screen_data.title.clone();
-    }
-
-    // Restore terminal modes
-    if let Some(modes) = &screen_data.modes {
-        screen.modes.application_cursor = modes.application_cursor;
-        screen.modes.application_keypad = modes.application_keypad;
-        screen.modes.bracketed_paste = modes.bracketed_paste;
-        screen.modes.focus_events = modes.focus_events;
-    }
+    cterm_proto::convert::screen::apply_screen_snapshot(terminal, screen_data);
 }
 
 /// Error type for daemon tab operations
