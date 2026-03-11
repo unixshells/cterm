@@ -125,10 +125,16 @@ async fn run_unix_socket_server(
 
     log::info!("Starting ctermd on Unix socket {}", config.socket_path);
 
-    // Set up signal handler for graceful shutdown
+    // Set up signal handler for graceful shutdown (SIGINT + SIGTERM)
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-        log::info!("Received shutdown signal");
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => log::info!("Received SIGINT"),
+            _ = sigterm.recv() => log::info!("Received SIGTERM"),
+        }
+        log::info!("Shutting down...");
     };
 
     let incoming = UnixListenerStream::new(listener);
