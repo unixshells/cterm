@@ -1396,6 +1396,241 @@ impl TerminalWidget {
                 }
             });
     }
+
+    /// Set up resize handling for daemon-backed sessions.
+    /// Resizes the local terminal and also notifies the daemon.
+    fn setup_daemon_resize(&self, session: cterm_client::SessionHandle) {
+        let terminal = Arc::clone(&self.terminal);
+        let cell_dims = Rc::clone(&self.cell_dims);
+
+        self.drawing_area
+            .connect_resize(move |_area, width, height| {
+                let dims = cell_dims.borrow();
+                let cols = ((width as f64) / dims.width).floor() as usize;
+                let rows = ((height as f64) / dims.height).floor() as usize;
+                drop(dims);
+
+                if cols > 0 && rows > 0 {
+                    // Resize local terminal (screen buffer)
+                    let mut term = terminal.lock();
+                    term.resize(cols, rows);
+                    drop(term);
+
+                    // Notify daemon of resize
+                    let session = session.clone();
+                    let cols = cols as u32;
+                    let rows = rows as u32;
+                    tokio::spawn(async move {
+                        if let Err(e) = session.resize(cols, rows).await {
+                            log::error!("Failed to resize daemon session: {}", e);
+                        }
+                    });
+                }
+            });
+    }
+
+    /// Create a terminal widget backed by a daemon session.
+    ///
+    /// The Terminal has no PTY — input goes through the write callback to the
+    /// daemon, and output is streamed from the daemon and parsed locally.
+    pub fn from_daemon(
+        session: cterm_client::SessionHandle,
+        config: &Config,
+        theme: &Theme,
+    ) -> Self {
+        let font_family = config.appearance.font.family.clone();
+        let font_size = config.appearance.font.size;
+        let cell_dims = calculate_cell_dimensions(&font_family, font_size);
+
+        let drawing_area = DrawingArea::new();
+        drawing_area.set_can_focus(true);
+        drawing_area.set_focusable(true);
+        drawing_area.add_css_class("terminal");
+        drawing_area.set_vexpand(true);
+        drawing_area.set_hexpand(true);
+
+        let min_width = (cell_dims.width * 80.0).ceil() as i32;
+        let min_height = (cell_dims.height * 24.0).ceil() as i32;
+        drawing_area.set_size_request(min_width, min_height);
+
+        // Create a Terminal with no PTY — write callback forwards to daemon
+        let mut terminal = Terminal::new(80, 24, ScreenConfig::default());
+        let write_session = session.clone();
+        terminal.set_write_fn(Box::new(move |data: &[u8]| {
+            let session = write_session.clone();
+            let data = data.to_vec();
+            tokio::spawn(async move {
+                if let Err(e) = session.write_input(&data).await {
+                    log::error!("Failed to write to daemon: {}", e);
+                }
+            });
+            Ok(())
+        }));
+
+        let terminal = Arc::new(Mutex::new(terminal));
+        let cell_dims = Rc::new(RefCell::new(cell_dims));
+
+        let widget = Self {
+            drawing_area: drawing_area.clone(),
+            terminal: Arc::clone(&terminal),
+            theme: theme.clone(),
+            font_family,
+            font_size: Rc::new(RefCell::new(font_size)),
+            default_font_size: font_size,
+            cell_dims,
+            background_override: Rc::new(RefCell::new(None)),
+            on_exit: Rc::new(RefCell::new(None)),
+            on_bell: Rc::new(RefCell::new(None)),
+            on_title_change: Rc::new(RefCell::new(None)),
+            preedit: Rc::new(RefCell::new(PreeditState::default())),
+            on_file_transfer: Rc::new(RefCell::new(None)),
+        };
+
+        widget.setup_drawing();
+        widget.setup_input();
+        widget.setup_drop();
+        widget.setup_daemon_reader(session.clone());
+        widget.setup_daemon_resize(session);
+
+        widget
+    }
+
+    /// Set up the daemon output reader — streams raw PTY output from the daemon
+    /// and feeds it through the local terminal parser.
+    fn setup_daemon_reader(&self, session: cterm_client::SessionHandle) {
+        let terminal = Arc::clone(&self.terminal);
+        let drawing_area = self.drawing_area.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel::<PtyMessage>();
+
+        // Spawn tokio task to stream output from daemon
+        let terminal_bg = Arc::clone(&terminal);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for daemon reader");
+
+            rt.block_on(async move {
+                match session.stream_output().await {
+                    Ok(mut stream) => {
+                        use tokio_stream::StreamExt;
+                        while let Some(result) = stream.next().await {
+                            match result {
+                                Ok(chunk) => {
+                                    if tx.send(PtyMessage::Data(chunk.data)).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Daemon stream error: {}", e);
+                                    let _ = tx.send(PtyMessage::Exited);
+                                    break;
+                                }
+                            }
+                        }
+                        let _ = tx.send(PtyMessage::Exited);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start daemon output stream: {}", e);
+                        let _ = tx.send(PtyMessage::Exited);
+                    }
+                }
+            });
+        });
+
+        // Process messages on main thread — identical to setup_pty_reader
+        let terminal_main = Arc::clone(&self.terminal);
+        let on_exit = Rc::clone(&self.on_exit);
+        let on_bell = Rc::clone(&self.on_bell);
+        let on_title_change = Rc::clone(&self.on_title_change);
+        let on_file_transfer = Rc::clone(&self.on_file_transfer);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    PtyMessage::Data(data) => {
+                        let mut term = terminal_main.lock();
+                        let events = term.process(&data);
+
+                        for event in events {
+                            match event {
+                                TerminalEvent::ClipboardRequest(op) => {
+                                    if let Some(display) = gdk::Display::default() {
+                                        let clipboard = display.clipboard();
+                                        match op {
+                                            ClipboardOperation::Set { selection: _, data } => {
+                                                if let Ok(text) = String::from_utf8(data) {
+                                                    clipboard.set_text(&text);
+                                                }
+                                            }
+                                            ClipboardOperation::Query { selection } => {
+                                                let terminal_clip = Arc::clone(&terminal_main);
+                                                let sel = selection;
+                                                clipboard.read_text_async(
+                                                    None::<&gio::Cancellable>,
+                                                    move |result| {
+                                                        let text = result
+                                                            .ok()
+                                                            .flatten()
+                                                            .map(|s| s.to_string())
+                                                            .unwrap_or_default();
+                                                        let mut term = terminal_clip.lock();
+                                                        let _ = term.send_clipboard_response(
+                                                            sel,
+                                                            text.as_bytes(),
+                                                        );
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                TerminalEvent::Bell => {
+                                    if let Some(ref callback) = *on_bell.borrow() {
+                                        callback();
+                                    }
+                                }
+                                TerminalEvent::TitleChanged(ref title) => {
+                                    if let Some(ref callback) = *on_title_change.borrow() {
+                                        callback(title);
+                                    }
+                                }
+                                TerminalEvent::ContentChanged | TerminalEvent::ProcessExited(_) => {
+                                }
+                            }
+                        }
+
+                        if term.screen().bell {
+                            term.screen_mut().bell = false;
+                            if let Some(ref callback) = *on_bell.borrow() {
+                                callback();
+                            }
+                        }
+
+                        let transfers = term.screen_mut().take_file_transfers();
+                        drop(term);
+
+                        for transfer in transfers {
+                            if let Some(ref callback) = *on_file_transfer.borrow() {
+                                callback(transfer);
+                            }
+                        }
+
+                        terminal_main.lock().screen_mut().dirty = false;
+                        drawing_area.queue_draw();
+                    }
+                    PtyMessage::Exited => {
+                        log::info!("Daemon session stream ended");
+                        if let Some(ref callback) = *on_exit.borrow() {
+                            callback();
+                        }
+                        return glib::ControlFlow::Break;
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 }
 
 /// Calculate cell dimensions using Pango font metrics

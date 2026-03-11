@@ -491,6 +491,7 @@ dependencies = [
  "cairo-rs",
  "clap",
  "cterm-app",
+ "cterm-client",
  "cterm-core",
  "cterm-ui",
  "env_logger",
@@ -506,6 +507,7 @@ dependencies = [
  "pangocairo",
  "parking_lot",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
