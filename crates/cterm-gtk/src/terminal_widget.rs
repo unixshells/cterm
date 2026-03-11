@@ -1062,7 +1062,6 @@ impl TerminalWidget {
         let (tx, rx) = std::sync::mpsc::channel::<PtyMessage>();
 
         // Spawn tokio task to stream output from daemon
-        let terminal_bg = Arc::clone(&terminal);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

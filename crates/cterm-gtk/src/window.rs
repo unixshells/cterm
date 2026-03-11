@@ -2400,7 +2400,7 @@ fn spawn_daemon_tab(
     let file_manager = Rc::clone(file_manager);
     let notification_bar = notification_bar.clone();
 
-    let (tx, rx) = glib::MainContext::channel::<DaemonAttachResult>(glib::Priority::DEFAULT);
+    let (tx, rx) = std::sync::mpsc::channel::<DaemonAttachResult>();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2419,58 +2419,66 @@ fn spawn_daemon_tab(
         let _ = tx.send(result);
     });
 
-    rx.attach(None, move |result| {
-        match result {
-            Ok(session) => {
-                let cfg = config.borrow();
-                let terminal = TerminalWidget::from_daemon(session, &cfg, &theme);
-                drop(cfg);
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        match rx.try_recv() {
+            Ok(result) => {
+                match result {
+                    Ok(session) => {
+                        let cfg = config.borrow();
+                        let terminal = TerminalWidget::from_daemon(session, &cfg, &theme);
+                        drop(cfg);
 
-                let tab_id = generate_tab_id(&next_tab_id);
-                let page_num = notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
-                tab_bar.add_tab(tab_id, &title);
+                        let tab_id = generate_tab_id(&next_tab_id);
+                        let page_num =
+                            notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
+                        tab_bar.add_tab(tab_id, &title);
 
-                if let Some(ref c) = color {
-                    tab_bar.set_color(tab_id, Some(c));
-                }
+                        if let Some(ref c) = color {
+                            tab_bar.set_color(tab_id, Some(c));
+                        }
 
-                setup_tab_callbacks(
-                    &notebook,
-                    &tabs,
-                    &config,
-                    &tab_bar,
-                    &window,
-                    &has_bell,
-                    &file_manager,
-                    &notification_bar,
-                    &terminal,
-                    tab_id,
-                    keep_open,
-                );
+                        setup_tab_callbacks(
+                            &notebook,
+                            &tabs,
+                            &config,
+                            &tab_bar,
+                            &window,
+                            &has_bell,
+                            &file_manager,
+                            &notification_bar,
+                            &terminal,
+                            tab_id,
+                            keep_open,
+                        );
 
-                finalize_new_tab(
-                    &notebook,
-                    &tabs,
-                    &tab_bar,
-                    tab_id,
-                    page_num,
-                    title.clone(),
-                    terminal,
-                    false,
-                );
+                        finalize_new_tab(
+                            &notebook,
+                            &tabs,
+                            &tab_bar,
+                            tab_id,
+                            page_num,
+                            title.clone(),
+                            terminal,
+                            false,
+                        );
 
-                // Store color in tab entry
-                if color.is_some() {
-                    if let Some(tab) = tabs.borrow_mut().iter_mut().find(|t| t.id == tab_id) {
-                        tab.color = color.clone();
+                        // Store color in tab entry
+                        if color.is_some() {
+                            if let Some(tab) = tabs.borrow_mut().iter_mut().find(|t| t.id == tab_id)
+                            {
+                                tab.color = color.clone();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to create daemon session: {}", e);
                     }
                 }
+                glib::ControlFlow::Break
             }
-            Err(e) => {
-                log::error!("Failed to create daemon session: {}", e);
-            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
         }
-        glib::ControlFlow::Break
     });
 }
 
@@ -2513,7 +2521,7 @@ fn create_daemon_tab(
     drop(cfg);
 
     // Connect and attach in background thread, then create tab on main thread
-    let (tx, rx) = glib::MainContext::channel::<DaemonAttachResult>(glib::Priority::DEFAULT);
+    let (tx, rx) = std::sync::mpsc::channel::<DaemonAttachResult>();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -2533,43 +2541,50 @@ fn create_daemon_tab(
         let _ = tx.send(result);
     });
 
-    rx.attach(None, move |result| {
-        match result {
-            Ok(session) => {
-                let title = format!(
-                    "Session: {}",
-                    &session.session_id()[..8.min(session.session_id().len())]
-                );
-                let cfg = config.borrow();
-                let terminal = TerminalWidget::from_daemon(session, &cfg, &theme);
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        match rx.try_recv() {
+            Ok(result) => {
+                match result {
+                    Ok(session) => {
+                        let title = format!(
+                            "Session: {}",
+                            &session.session_id()[..8.min(session.session_id().len())]
+                        );
+                        let cfg = config.borrow();
+                        let terminal = TerminalWidget::from_daemon(session, &cfg, &theme);
 
-                let tab_id = generate_tab_id(&next_tab_id);
-                let page_num = notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
-                tab_bar.add_tab(tab_id, &title);
+                        let tab_id = generate_tab_id(&next_tab_id);
+                        let page_num =
+                            notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
+                        tab_bar.add_tab(tab_id, &title);
 
-                setup_tab_callbacks(
-                    &notebook,
-                    &tabs,
-                    &config,
-                    &tab_bar,
-                    &window,
-                    &has_bell,
-                    &file_manager,
-                    &notification_bar,
-                    &terminal,
-                    tab_id,
-                    false,
-                );
+                        setup_tab_callbacks(
+                            &notebook,
+                            &tabs,
+                            &config,
+                            &tab_bar,
+                            &window,
+                            &has_bell,
+                            &file_manager,
+                            &notification_bar,
+                            &terminal,
+                            tab_id,
+                            false,
+                        );
 
-                finalize_new_tab(
-                    &notebook, &tabs, &tab_bar, tab_id, page_num, title, terminal, false,
-                );
+                        finalize_new_tab(
+                            &notebook, &tabs, &tab_bar, tab_id, page_num, title, terminal, false,
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("Failed to attach to daemon session: {}", e);
+                    }
+                }
+                glib::ControlFlow::Break
             }
-            Err(e) => {
-                log::error!("Failed to attach to daemon session: {}", e);
-            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
         }
-        glib::ControlFlow::Break
     });
 }
 

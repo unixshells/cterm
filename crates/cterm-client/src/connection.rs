@@ -40,17 +40,22 @@ pub struct DaemonConnection {
 }
 
 impl DaemonConnection {
-    /// Connect to the local ctermd via Unix socket, auto-starting if needed.
+    /// Connect to the local ctermd, auto-starting if needed.
+    ///
+    /// On Unix, connects via Unix socket. On Windows, connects via named pipe.
     pub async fn connect_local() -> Result<Self> {
         let socket_path = socket::default_socket_path();
         Self::connect_unix(&socket_path, true).await
     }
 
-    /// Connect to ctermd via a specific Unix socket path.
+    /// Connect to ctermd via a specific socket/pipe path.
+    ///
+    /// On Unix, `socket_path` is a Unix socket path.
+    /// On Windows, `socket_path` is a named pipe path (e.g., `\\.\pipe\ctermd-user`).
     /// If `auto_start` is true, spawn ctermd if not already running.
     pub async fn connect_unix(socket_path: &Path, auto_start: bool) -> Result<Self> {
         // Try connecting first
-        match Self::try_connect_unix(socket_path).await {
+        match Self::try_connect(socket_path).await {
             Ok(conn) => Ok(conn),
             Err(_) if auto_start => {
                 // Try to start the daemon
@@ -58,7 +63,7 @@ impl DaemonConnection {
                 // Retry connection with backoff
                 for i in 0..20 {
                     tokio::time::sleep(std::time::Duration::from_millis(100 * (i + 1))).await;
-                    if let Ok(conn) = Self::try_connect_unix(socket_path).await {
+                    if let Ok(conn) = Self::try_connect(socket_path).await {
                         return Ok(conn);
                     }
                 }
@@ -92,6 +97,7 @@ impl DaemonConnection {
     /// sessions survive SSH disconnects and can be reattached.
     ///
     /// The `host` parameter can be `user@hostname` or just `hostname`.
+    #[cfg(unix)]
     pub async fn connect_ssh(host: &str) -> Result<Self> {
         use tokio::process::Command as TokioCommand;
 
@@ -214,6 +220,7 @@ impl DaemonConnection {
     }
 
     /// Get the local socket path used for SSH forwarding to a given host
+    #[cfg(unix)]
     fn ssh_forward_socket_path(host: &str) -> PathBuf {
         // Sanitize hostname for use in path
         let safe_host: String = host
@@ -232,7 +239,20 @@ impl DaemonConnection {
         path
     }
 
+    /// Try to connect to the daemon at the given path (platform-dispatched).
+    async fn try_connect(socket_path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            Self::try_connect_unix(socket_path).await
+        }
+        #[cfg(windows)]
+        {
+            Self::try_connect_named_pipe(socket_path).await
+        }
+    }
+
     /// Try to connect to an existing Unix socket
+    #[cfg(unix)]
     async fn try_connect_unix(socket_path: &Path) -> Result<Self> {
         if !socket_path.exists() {
             return Err(ClientError::Connection(format!(
@@ -253,6 +273,24 @@ impl DaemonConnection {
             }))
             .await?;
 
+        Self::handshake(channel).await
+    }
+
+    /// Try to connect to an existing named pipe (Windows)
+    #[cfg(windows)]
+    async fn try_connect_named_pipe(pipe_path: &Path) -> Result<Self> {
+        let pipe_name = pipe_path.to_string_lossy().to_string();
+        let channel = tonic::transport::Endpoint::try_from("http://[::]:0")
+            .map_err(|e| ClientError::Connection(e.to_string()))?
+            .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+                let name = pipe_name.clone();
+                async move {
+                    let client =
+                        tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?;
+                    Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(client))
+                }
+            }))
+            .await?;
         Self::handshake(channel).await
     }
 
@@ -331,9 +369,15 @@ impl DaemonConnection {
         }
 
         // Second: in PATH
-        if let Ok(output) = Command::new("which").arg("ctermd").output() {
+        #[cfg(unix)]
+        let which_cmd = "which";
+        #[cfg(windows)]
+        let which_cmd = "where";
+        if let Ok(output) = Command::new(which_cmd).arg("ctermd").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                // `where` on Windows may return multiple lines; take the first
+                let path = path.lines().next().unwrap_or("").trim();
                 if !path.is_empty() {
                     return Ok(PathBuf::from(path));
                 }

@@ -2,7 +2,11 @@
 
 use std::path::PathBuf;
 
-/// Get the default Unix socket path for ctermd
+/// Get the default socket path for ctermd.
+///
+/// On macOS, returns a Unix socket path under `~/Library/Application Support/com.cterm.terminal/`.
+/// On Linux, returns a Unix socket path under `$XDG_RUNTIME_DIR/cterm/` or `/tmp/`.
+/// On Windows, returns a named pipe path like `\\.\pipe\ctermd-{USERNAME}`.
 pub fn default_socket_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -34,9 +38,10 @@ pub fn default_socket_path() -> PathBuf {
         PathBuf::from(format!("/tmp/ctermd-{}.sock", uid))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        PathBuf::from("/tmp/ctermd.sock")
+        let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
+        PathBuf::from(format!(r"\\.\pipe\ctermd-{}", username))
     }
 }
 

@@ -127,7 +127,7 @@ fn load_sessions(
     let status_label = status_label.clone();
 
     // Spawn background thread to query daemon
-    let (tx, rx) = glib::MainContext::channel::<SessionResult>(glib::Priority::DEFAULT);
+    let (tx, rx) = std::sync::mpsc::channel::<SessionResult>();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -156,31 +156,37 @@ fn load_sessions(
         let _ = tx.send(result);
     });
 
-    rx.attach(None, move |result| {
-        match result {
-            Ok(entries) => {
-                if entries.is_empty() {
-                    status_label.set_text(
-                        "No sessions available. The daemon is running but has no active sessions.",
-                    );
-                } else {
-                    status_label.set_text(&format!("{} session(s) found", entries.len()));
-                    for entry in &entries {
-                        let row = create_session_row(entry);
-                        list_box.append(&row);
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        match rx.try_recv() {
+            Ok(result) => {
+                match result {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            status_label.set_text(
+                                "No sessions available. The daemon is running but has no active sessions.",
+                            );
+                        } else {
+                            status_label.set_text(&format!("{} session(s) found", entries.len()));
+                            for entry in &entries {
+                                let row = create_session_row(entry);
+                                list_box.append(&row);
+                            }
+                            // Select first row
+                            if let Some(first_row) = list_box.row_at_index(0) {
+                                list_box.select_row(Some(&first_row));
+                            }
+                        }
+                        *sessions_data.borrow_mut() = entries;
                     }
-                    // Select first row
-                    if let Some(first_row) = list_box.row_at_index(0) {
-                        list_box.select_row(Some(&first_row));
+                    Err(e) => {
+                        status_label.set_text(&format!("Failed to connect: {}", e));
                     }
                 }
-                *sessions_data.borrow_mut() = entries;
+                glib::ControlFlow::Break
             }
-            Err(e) => {
-                status_label.set_text(&format!("Failed to connect: {}", e));
-            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
         }
-        glib::ControlFlow::Break
     });
 }
 
@@ -292,7 +298,7 @@ where
         // Disable buttons while connecting
         status_label.set_text("Connecting...");
 
-        let (tx, rx) = glib::MainContext::channel::<SshConnectResult>(glib::Priority::DEFAULT);
+        let (tx, rx) = std::sync::mpsc::channel::<SshConnectResult>();
         let host_bg = host.clone();
 
         std::thread::spawn(move || {
@@ -320,35 +326,41 @@ where
         });
 
         let dialog_weak = dialog.downgrade();
-        rx.attach(None, move |result| {
-            match result {
-                Ok(session) => {
-                    callback(session);
-                    if let Some(dialog) = dialog_weak.upgrade() {
-                        dialog.close();
-                    }
-                }
-                Err(e) => {
-                    if let Some(dialog) = dialog_weak.upgrade() {
-                        let content = dialog.content_area();
-                        // Find status label (last label in content area)
-                        let mut child = content.first_child();
-                        let mut last_label = None;
-                        while let Some(widget) = child {
-                            if widget.downcast_ref::<Label>().is_some() {
-                                last_label = Some(widget.clone());
-                            }
-                            child = widget.next_sibling();
-                        }
-                        if let Some(label) = last_label {
-                            if let Some(label) = label.downcast_ref::<Label>() {
-                                label.set_text(&format!("Connection failed: {}", e));
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            match rx.try_recv() {
+                Ok(result) => {
+                    match result {
+                        Ok(session) => {
+                            callback(session);
+                            if let Some(dialog) = dialog_weak.upgrade() {
+                                dialog.close();
                             }
                         }
+                        Err(e) => {
+                            if let Some(dialog) = dialog_weak.upgrade() {
+                                let content = dialog.content_area();
+                                // Find status label (last label in content area)
+                                let mut child = content.first_child();
+                                let mut last_label = None;
+                                while let Some(widget) = child {
+                                    if widget.downcast_ref::<Label>().is_some() {
+                                        last_label = Some(widget.clone());
+                                    }
+                                    child = widget.next_sibling();
+                                }
+                                if let Some(label) = last_label {
+                                    if let Some(label) = label.downcast_ref::<Label>() {
+                                        label.set_text(&format!("Connection failed: {}", e));
+                                    }
+                                }
+                            }
+                        }
                     }
+                    glib::ControlFlow::Break
                 }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
             }
-            glib::ControlFlow::Break
         });
     });
 
