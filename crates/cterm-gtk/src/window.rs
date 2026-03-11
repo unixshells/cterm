@@ -1829,7 +1829,7 @@ impl CtermWindow {
     pub fn add_reconnected_tab(&self, recon: cterm_app::daemon_reconnect::ReconnectedSession) {
         let sid = recon.handle.session_id().to_string();
         let title = if recon.title.is_empty() {
-            format!("Session: {}", &sid[..8.min(sid.len())])
+            "Terminal".to_string()
         } else {
             recon.title.clone()
         };
@@ -2387,7 +2387,7 @@ fn create_daemon_tab(
                 match result {
                     Ok(session) => {
                         let sid = session.session_id().to_string();
-                        let title = format!("Session: {}", &sid[..8.min(sid.len())]);
+                        let title = "Terminal".to_string();
                         let cfg = config.borrow();
                         let terminal = TerminalWidget::from_daemon(session, &cfg, &theme);
 

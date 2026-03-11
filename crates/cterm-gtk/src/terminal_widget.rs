@@ -857,7 +857,7 @@ impl TerminalWidget {
 
     /// Set up resize handling for daemon-backed sessions.
     /// Resizes the local terminal and also notifies the daemon.
-    fn setup_daemon_resize(&self, session: cterm_client::SessionHandle) {
+    fn setup_daemon_resize(&self, cmd_tx: tokio::sync::mpsc::UnboundedSender<DaemonCommand>) {
         let terminal = Arc::clone(&self.terminal);
         let cell_dims = Rc::clone(&self.cell_dims);
 
@@ -874,15 +874,8 @@ impl TerminalWidget {
                     term.resize(cols, rows);
                     drop(term);
 
-                    // Notify daemon of resize
-                    let session = session.clone();
-                    let cols = cols as u32;
-                    let rows = rows as u32;
-                    tokio::spawn(async move {
-                        if let Err(e) = session.resize(cols, rows).await {
-                            log::error!("Failed to resize daemon session: {}", e);
-                        }
-                    });
+                    // Notify daemon of resize via command channel
+                    let _ = cmd_tx.send(DaemonCommand::Resize(cols as u32, rows as u32));
                 }
             });
     }
@@ -911,17 +904,17 @@ impl TerminalWidget {
         let min_height = (cell_dims.height * 24.0).ceil() as i32;
         drawing_area.set_size_request(min_width, min_height);
 
-        // Create a Terminal with no PTY — write callback forwards to daemon
+        // Capture session ID before session is consumed
+        let sid = session.session_id().to_string();
+
+        // Set up command channel — write/resize callbacks send to the background I/O thread
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
+
+        // Create a Terminal with no PTY — write callback forwards via channel
         let mut terminal = Terminal::new(80, 24, ScreenConfig::default());
-        let write_session = session.clone();
+        let write_tx = cmd_tx.clone();
         terminal.set_write_fn(Box::new(move |data: &[u8]| {
-            let session = write_session.clone();
-            let data = data.to_vec();
-            tokio::spawn(async move {
-                if let Err(e) = session.write_input(&data).await {
-                    log::error!("Failed to write to daemon: {}", e);
-                }
-            });
+            let _ = write_tx.send(DaemonCommand::Write(data.to_vec()));
             Ok(())
         }));
 
@@ -947,8 +940,8 @@ impl TerminalWidget {
         widget.setup_drawing();
         widget.setup_input();
         widget.setup_drop();
-        widget.setup_daemon_reader(session.clone());
-        widget.setup_daemon_resize(session);
+        widget.setup_daemon_reader(sid, cmd_rx);
+        widget.setup_daemon_resize(cmd_tx);
 
         widget
     }
@@ -983,17 +976,16 @@ impl TerminalWidget {
         // Apply screen snapshot BEFORE wrapping in Arc<Mutex<>>
         recon.apply_screen(&mut terminal);
 
-        // Set up write callback to forward input to daemon
-        let session = recon.handle;
-        let write_session = session.clone();
+        // Capture session ID before session is consumed
+        let sid = recon.handle.session_id().to_string();
+
+        // Set up command channel — write/resize callbacks send to the background I/O thread
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
+
+        // Set up write callback to forward input via channel
+        let write_tx = cmd_tx.clone();
         terminal.set_write_fn(Box::new(move |data: &[u8]| {
-            let session = write_session.clone();
-            let data = data.to_vec();
-            tokio::spawn(async move {
-                if let Err(e) = session.write_input(&data).await {
-                    log::error!("Failed to write to daemon: {}", e);
-                }
-            });
+            let _ = write_tx.send(DaemonCommand::Write(data.to_vec()));
             Ok(())
         }));
 
@@ -1019,20 +1011,27 @@ impl TerminalWidget {
         widget.setup_drawing();
         widget.setup_input();
         widget.setup_drop();
-        widget.setup_daemon_reader(session.clone());
-        widget.setup_daemon_resize(session);
+        widget.setup_daemon_reader(sid, cmd_rx);
+        widget.setup_daemon_resize(cmd_tx);
 
         widget
     }
 
     /// Set up the daemon output reader — streams raw PTY output from the daemon
     /// and feeds it through the local terminal parser.
-    fn setup_daemon_reader(&self, session: cterm_client::SessionHandle) {
+    ///
+    /// Creates a fresh daemon connection in its own tokio runtime because tonic
+    /// channels are tied to the runtime that created them.
+    fn setup_daemon_reader(
+        &self,
+        session_id: String,
+        cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCommand>,
+    ) {
         let drawing_area = self.drawing_area.clone();
 
         let (tx, rx) = std::sync::mpsc::channel::<PtyMessage>();
 
-        // Spawn tokio task to stream output from daemon
+        // Spawn I/O thread with its own tokio runtime and fresh daemon connection
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1040,6 +1039,50 @@ impl TerminalWidget {
                 .expect("Failed to create tokio runtime for daemon reader");
 
             rt.block_on(async move {
+                // Create a fresh connection to the daemon
+                let conn = match cterm_client::DaemonConnection::connect_local().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("Failed to connect to daemon for output stream: {}", e);
+                        let _ = tx.send(PtyMessage::Exited);
+                        return;
+                    }
+                };
+                let (session, _snapshot) = match conn.attach_session(&session_id, 80, 24).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!(
+                            "Failed to attach to session {} for output stream: {}",
+                            session_id,
+                            e
+                        );
+                        let _ = tx.send(PtyMessage::Exited);
+                        return;
+                    }
+                };
+
+                // Spawn command handler — drains write/resize commands and forwards to daemon
+                let cmd_session = session.clone();
+                tokio::spawn(async move {
+                    let mut cmd_rx = cmd_rx;
+                    while let Some(cmd) = cmd_rx.recv().await {
+                        match cmd {
+                            DaemonCommand::Write(data) => {
+                                if let Err(e) = cmd_session.write_input(&data).await {
+                                    log::error!("Failed to write to daemon: {}", e);
+                                    break;
+                                }
+                            }
+                            DaemonCommand::Resize(cols, rows) => {
+                                if let Err(e) = cmd_session.resize(cols, rows).await {
+                                    log::error!("Failed to resize daemon session: {}", e);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Read output stream
                 match session.stream_output().await {
                     Ok(mut stream) => {
                         use tokio_stream::StreamExt;
@@ -1230,6 +1273,12 @@ fn calculate_cell_dimensions(font_family: &str, font_size: f64) -> CellDimension
 enum PtyMessage {
     Data(Vec<u8>),
     Exited,
+}
+
+/// Commands sent to the daemon I/O thread
+enum DaemonCommand {
+    Write(Vec<u8>),
+    Resize(u32, u32),
 }
 
 /// Rendering parameters for draw_terminal

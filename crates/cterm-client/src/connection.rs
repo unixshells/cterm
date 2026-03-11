@@ -334,7 +334,7 @@ impl DaemonConnection {
         log::info!("Starting ctermd: {}", ctermd.display());
 
         Command::new(&ctermd)
-            .args(["--listen", &socket_path.to_string_lossy()])
+            .args(["--listen", &socket_path.to_string_lossy(), "--foreground"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

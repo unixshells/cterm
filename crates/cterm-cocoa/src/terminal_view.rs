@@ -61,6 +61,12 @@ impl Default for ViewState {
     }
 }
 
+/// Commands sent to the daemon I/O thread
+enum DaemonCommand {
+    Write(Vec<u8>),
+    Resize(u32, u32),
+}
+
 /// Terminal view state
 pub struct TerminalViewIvars {
     terminal: Arc<Mutex<Terminal>>,
@@ -89,6 +95,8 @@ pub struct TerminalViewIvars {
     file_manager: RefCell<PendingFileManager>,
     /// Color palette for HTML export
     color_palette: cterm_core::color::ColorPalette,
+    /// Command channel for daemon I/O (write + resize) — None for local PTY sessions
+    daemon_cmd_tx: RefCell<Option<tokio::sync::mpsc::UnboundedSender<DaemonCommand>>>,
 }
 
 define_class!(
@@ -1306,6 +1314,7 @@ impl TerminalView {
             notification_bar: RefCell::new(None),
             file_manager: RefCell::new(PendingFileManager::new()),
             color_palette: theme.colors.clone(),
+            daemon_cmd_tx: RefCell::new(None),
         });
 
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -1344,19 +1353,15 @@ impl TerminalView {
         terminal.screen_mut().set_cell_height_hint(cell_height);
         terminal.screen_mut().set_cell_width_hint(cell_width);
 
-        // Capture session ID before session is moved into closures/threads
+        // Capture session ID before session is consumed
         let sid = session.session_id().to_string();
 
-        // Set up write callback to forward input to daemon
-        let write_session = session.clone();
+        // Set up command channel — write/resize callbacks send to the background I/O thread
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
+
+        let write_tx = cmd_tx.clone();
         terminal.set_write_fn(Box::new(move |data: &[u8]| {
-            let session = write_session.clone();
-            let data = data.to_vec();
-            tokio::spawn(async move {
-                if let Err(e) = session.write_input(&data).await {
-                    log::error!("Failed to write to daemon: {}", e);
-                }
-            });
+            let _ = write_tx.send(DaemonCommand::Write(data.to_vec()));
             Ok(())
         }));
 
@@ -1370,15 +1375,16 @@ impl TerminalView {
             ViewInitOptions::default(),
         );
 
-        // Store daemon session ID for upgrade state
-        this.set_session_id(Some(sid));
+        // Store daemon session ID and command channel for resize notifications
+        this.set_session_id(Some(sid.clone()));
+        *this.ivars().daemon_cmd_tx.borrow_mut() = Some(cmd_tx);
 
         let view_ptr = &*this as *const _ as usize;
 
-        // Start daemon output reader instead of PTY reader
+        // Start daemon I/O thread — owns the connection, handles reads and writes
         let state_clone = state.clone();
         std::thread::spawn(move || {
-            Self::read_daemon_loop(session, terminal, state_clone);
+            Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx);
         });
 
         this.schedule_redraw_check(view_ptr, state);
@@ -1414,17 +1420,12 @@ impl TerminalView {
         // Capture session ID before session is moved into closures/threads
         let sid = recon.handle.session_id().to_string();
 
-        // Set up write callback to forward input to daemon
-        let session = recon.handle;
-        let write_session = session.clone();
+        // Set up command channel — write/resize callbacks send to the background I/O thread
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
+
+        let write_tx = cmd_tx.clone();
         terminal.set_write_fn(Box::new(move |data: &[u8]| {
-            let session = write_session.clone();
-            let data = data.to_vec();
-            tokio::spawn(async move {
-                if let Err(e) = session.write_input(&data).await {
-                    log::error!("Failed to write to daemon: {}", e);
-                }
-            });
+            let _ = write_tx.send(DaemonCommand::Write(data.to_vec()));
             Ok(())
         }));
 
@@ -1438,15 +1439,16 @@ impl TerminalView {
             ViewInitOptions::default(),
         );
 
-        // Store daemon session ID for upgrade state
-        this.set_session_id(Some(sid));
+        // Store daemon session ID and command channel for resize notifications
+        this.set_session_id(Some(sid.clone()));
+        *this.ivars().daemon_cmd_tx.borrow_mut() = Some(cmd_tx);
 
         let view_ptr = &*this as *const _ as usize;
 
-        // Start daemon output reader
+        // Start daemon I/O thread — owns the connection, handles reads and writes
         let state_clone = state.clone();
         std::thread::spawn(move || {
-            Self::read_daemon_loop(session, terminal, state_clone);
+            Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx);
         });
 
         this.schedule_redraw_check(view_ptr, state);
@@ -1455,12 +1457,17 @@ impl TerminalView {
 
     /// Background thread to read output from a daemon session.
     ///
-    /// Creates a local tokio runtime, streams raw PTY output from the daemon,
-    /// and feeds it through the local terminal parser.
+    /// Creates a local tokio runtime with its own daemon connection,
+    /// streams raw PTY output, and feeds it through the local terminal parser.
+    ///
+    /// We create a fresh connection rather than reusing the session handle because
+    /// tonic channels are tied to the tokio runtime that created them. The original
+    /// runtime (from the connection thread) is dropped before this thread starts.
     fn read_daemon_loop(
-        session: cterm_client::SessionHandle,
+        session_id: String,
         terminal: Arc<Mutex<Terminal>>,
         state: Arc<ViewState>,
+        cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCommand>,
     ) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1468,6 +1475,50 @@ impl TerminalView {
             .expect("Failed to create tokio runtime for daemon reader");
 
         rt.block_on(async move {
+            // Create a fresh connection to the daemon for streaming
+            let conn = match cterm_client::DaemonConnection::connect_local().await {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Failed to connect to daemon for output stream: {}", e);
+                    state.pty_closed.store(true, Ordering::Relaxed);
+                    return;
+                }
+            };
+            let (session, _snapshot) = match conn.attach_session(&session_id, 80, 24).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!(
+                        "Failed to attach to session {} for output stream: {}",
+                        session_id,
+                        e
+                    );
+                    state.pty_closed.store(true, Ordering::Relaxed);
+                    return;
+                }
+            };
+
+            // Spawn command handler — drains write/resize commands and forwards to daemon
+            let cmd_session = session.clone();
+            tokio::spawn(async move {
+                let mut cmd_rx = cmd_rx;
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        DaemonCommand::Write(data) => {
+                            if let Err(e) = cmd_session.write_input(&data).await {
+                                log::error!("Failed to write to daemon: {}", e);
+                                break;
+                            }
+                        }
+                        DaemonCommand::Resize(cols, rows) => {
+                            if let Err(e) = cmd_session.resize(cols, rows).await {
+                                log::error!("Failed to resize daemon session: {}", e);
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Read output stream
             match session.stream_output().await {
                 Ok(mut stream) => {
                     use tokio_stream::StreamExt;
@@ -1696,7 +1747,13 @@ impl TerminalView {
         if cols > 0 && rows > 0 {
             let mut terminal = self.ivars().terminal.lock();
             terminal.resize(cols, rows);
+            drop(terminal);
             log::debug!("Resized terminal to {}x{}", cols, rows);
+
+            // Notify daemon of resize (if connected)
+            if let Some(ref tx) = *self.ivars().daemon_cmd_tx.borrow() {
+                let _ = tx.send(DaemonCommand::Resize(cols as u32, rows as u32));
+            }
         }
     }
 

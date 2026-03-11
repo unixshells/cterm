@@ -419,11 +419,7 @@ impl CtermWindow {
         theme: &Theme,
         session: cterm_client::SessionHandle,
     ) -> Retained<Self> {
-        let title = format!(
-            "Session: {}",
-            &session.session_id()[..8.min(session.session_id().len())]
-        );
-        let this = Self::init_window(mtm, config, theme, &title, None);
+        let this = Self::init_window(mtm, config, theme, "Terminal", None);
         let terminal_view = TerminalView::from_daemon(mtm, config, theme, session);
         this.attach_terminal_view(terminal_view);
         this
@@ -437,10 +433,7 @@ impl CtermWindow {
         recon: cterm_app::daemon_reconnect::ReconnectedSession,
     ) -> Retained<Self> {
         let title = if recon.title.is_empty() {
-            format!(
-                "Session: {}",
-                &recon.handle.session_id()[..8.min(recon.handle.session_id().len())]
-            )
+            "Terminal".to_string()
         } else {
             recon.title.clone()
         };
@@ -530,12 +523,9 @@ impl CtermWindow {
                         let mtm = unsafe { MainThreadMarker::new_unchecked() };
                         let window: &CtermWindow = unsafe { &*(window_ptr as *const CtermWindow) };
 
-                        let title = template_name.clone().unwrap_or_else(|| {
-                            format!(
-                                "Session: {}",
-                                &session.session_id()[..8.min(session.session_id().len())]
-                            )
-                        });
+                        let title = template_name
+                            .clone()
+                            .unwrap_or_else(|| "Terminal".to_string());
 
                         let new_window = CtermWindow::from_daemon(mtm, &config, &theme, session);
                         new_window.setTitle(&NSString::from_str(&title));

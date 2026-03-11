@@ -1098,7 +1098,11 @@ impl ScreenPerformer<'_> {
         };
 
         if decoded.width == 0 || decoded.height == 0 {
-            log::warn!("OSC 1337 inline image has zero dimension: {}x{}", decoded.width, decoded.height);
+            log::warn!(
+                "OSC 1337 inline image has zero dimension: {}x{}",
+                decoded.width,
+                decoded.height
+            );
             return;
         }
 
