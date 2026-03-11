@@ -4,18 +4,28 @@ package cterm.terminal;
 
 // Terminal daemon gRPC service
 service TerminalService {
+  // Connection Management
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
   // Session Management
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
 
+  // Attach/Detach - UI clients claim or release sessions
+  rpc AttachSession(AttachSessionRequest) returns (AttachSessionResponse);
+  rpc DetachSession(DetachSessionRequest) returns (DetachSessionResponse);
+
   // Input
   rpc WriteInput(WriteInputRequest) returns (WriteInputResponse);
   rpc SendKey(SendKeyRequest) returns (SendKeyResponse);
 
-  // Output Streaming
+  // Output Streaming (raw PTY data - for local clients doing their own parsing)
   rpc StreamOutput(StreamOutputRequest) returns (stream OutputChunk);
+
+  // Screen Update Streaming (parsed screen diffs - efficient for remote)
+  rpc StreamScreenUpdates(StreamScreenUpdatesRequest) returns (stream ScreenUpdate);
 
   // Screen State
   rpc GetScreen(GetScreenRequest) returns (GetScreenResponse);
@@ -27,8 +37,38 @@ service TerminalService {
   rpc Resize(ResizeRequest) returns (ResizeResponse);
   rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
 
-  // Event Streaming
+  // Event Streaming (per-session terminal events)
   rpc StreamEvents(StreamEventsRequest) returns (stream TerminalEvent);
+
+  // Daemon Management
+  rpc GetDaemonInfo(GetDaemonInfoRequest) returns (GetDaemonInfoResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+// ============================================================================
+// Connection Management
+// ============================================================================
+
+message HandshakeRequest {
+  // Unique ID for this UI client instance
+  string client_id = 1;
+  // Client version string
+  string client_version = 2;
+  // Protocol version for compatibility negotiation
+  uint32 protocol_version = 3;
+}
+
+message HandshakeResponse {
+  // Daemon instance ID
+  string daemon_id = 1;
+  // Daemon version string
+  string daemon_version = 2;
+  // Whether this is a local (Unix socket) or remote (SSH) connection
+  bool is_local = 3;
+  // Hostname of the machine running the daemon
+  string hostname = 4;
+  // Protocol version the daemon supports
+  uint32 protocol_version = 5;
 }
 
 // ============================================================================
@@ -75,6 +115,8 @@ message SessionInfo {
   string title = 4;
   bool running = 5;
   int32 child_pid = 6;
+  // Number of UI clients currently attached to this session
+  uint32 attached_clients = 7;
 }
 
 message GetSessionRequest {
@@ -92,6 +134,36 @@ message DestroySessionRequest {
 }
 
 message DestroySessionResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Attach/Detach
+// ============================================================================
+
+message AttachSessionRequest {
+  string session_id = 1;
+  // Client's terminal dimensions (daemon may resize the session)
+  uint32 cols = 2;
+  uint32 rows = 3;
+  // If true, include a full screen snapshot in the response
+  bool want_screen_snapshot = 4;
+}
+
+message AttachSessionResponse {
+  SessionInfo session = 1;
+  // Full screen state if want_screen_snapshot was true
+  GetScreenResponse initial_screen = 2;
+}
+
+message DetachSessionRequest {
+  string session_id = 1;
+  // If true, keep the session running in background.
+  // If false, destroy the session.
+  bool keep_running = 2;
+}
+
+message DetachSessionResponse {
   bool success = 1;
 }
 
@@ -164,6 +236,52 @@ message StreamOutputRequest {
 message OutputChunk {
   bytes data = 1;
   uint64 timestamp_ms = 2;
+}
+
+// ============================================================================
+// Screen Update Streaming
+// ============================================================================
+
+message StreamScreenUpdatesRequest {
+  string session_id = 1;
+}
+
+message ScreenUpdate {
+  string session_id = 1;
+  // Monotonic sequence number for ordering
+  uint64 sequence = 2;
+  oneof update_type {
+    FullScreenUpdate full_screen = 3;
+    DirtyRowsUpdate dirty_rows = 4;
+    CursorUpdate cursor = 5;
+    TitleUpdate title = 6;
+    ModesUpdate modes = 7;
+  }
+}
+
+message FullScreenUpdate {
+  GetScreenResponse screen = 1;
+}
+
+message DirtyRowsUpdate {
+  repeated DirtyRow rows = 1;
+}
+
+message DirtyRow {
+  uint32 row_index = 1;
+  repeated Cell cells = 2;
+}
+
+message CursorUpdate {
+  CursorPosition cursor = 1;
+}
+
+message TitleUpdate {
+  string title = 1;
+}
+
+message ModesUpdate {
+  TerminalModes modes = 1;
 }
 
 // ============================================================================
@@ -360,4 +478,31 @@ enum ClipboardSelection {
   CLIPBOARD_SELECTION_CLIPBOARD = 1;
   CLIPBOARD_SELECTION_PRIMARY = 2;
   CLIPBOARD_SELECTION_SELECT = 3;
+}
+
+// ============================================================================
+// Daemon Management
+// ============================================================================
+
+message GetDaemonInfoRequest {}
+
+message GetDaemonInfoResponse {
+  string daemon_id = 1;
+  string version = 2;
+  string hostname = 3;
+  uint32 session_count = 4;
+  uint32 client_count = 5;
+  // Uptime in seconds
+  uint64 uptime_secs = 6;
+}
+
+message ShutdownRequest {
+  // If true, force shutdown even with active sessions
+  bool force = 1;
+}
+
+message ShutdownResponse {
+  bool success = 1;
+  // If not successful, reason why (e.g. "active sessions exist")
+  string reason = 2;
 }

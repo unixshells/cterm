@@ -27,6 +27,7 @@ members = [
     "crates/cterm-core",
     "crates/cterm-ui",
     "crates/cterm-app",
+    "crates/cterm-proto",
     "crates/cterm-gtk",
     "crates/cterm-cocoa",
     "crates/cterm-win32",
@@ -117,6 +118,7 @@ dispatch2 = "0.3"
 cterm-core = { path = "crates/cterm-core" }
 cterm-ui = { path = "crates/cterm-ui" }
 cterm-app = { path = "crates/cterm-app" }
+cterm-proto = { path = "crates/cterm-proto" }
 cterm-headless = { path = "crates/cterm-headless" }
 
 [profile.release]

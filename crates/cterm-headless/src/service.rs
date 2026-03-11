@@ -7,6 +7,8 @@ use crate::convert::{
 use crate::proto::terminal_service_server::TerminalService;
 use crate::proto::*;
 use crate::session::SessionManager;
+#[cfg(unix)]
+use libc;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -81,6 +83,7 @@ impl TerminalService for TerminalServiceImpl {
                     title: s.title(),
                     running: s.is_running(),
                     child_pid: s.child_pid().unwrap_or(0),
+                    attached_clients: 0, // TODO: track attached clients
                 }
             })
             .collect();
@@ -108,6 +111,7 @@ impl TerminalService for TerminalServiceImpl {
             title: session.title(),
             running: session.is_running(),
             child_pid: session.child_pid().unwrap_or(0),
+            attached_clients: 0, // TODO: track attached clients
         };
 
         Ok(Response::new(GetSessionResponse {
@@ -362,5 +366,201 @@ impl TerminalService for TerminalServiceImpl {
         });
 
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    // ========================================================================
+    // Connection Management (new RPCs)
+    // ========================================================================
+
+    async fn handshake(
+        &self,
+        request: Request<HandshakeRequest>,
+    ) -> Result<Response<HandshakeResponse>, Status> {
+        let req = request.into_inner();
+        log::info!(
+            "Client connected: {} (version {})",
+            req.client_id,
+            req.client_version
+        );
+
+        let hostname = gethostname();
+
+        Ok(Response::new(HandshakeResponse {
+            daemon_id: String::new(), // TODO: generate daemon ID
+            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+            is_local: true, // TODO: detect from transport
+            hostname,
+            protocol_version: 1,
+        }))
+    }
+
+    async fn attach_session(
+        &self,
+        request: Request<AttachSessionRequest>,
+    ) -> Result<Response<AttachSessionResponse>, Status> {
+        let req = request.into_inner();
+        let session = self
+            .session_manager
+            .get_session(&req.session_id)
+            .map_err(Status::from)?;
+
+        // Resize to client dimensions if provided
+        if req.cols > 0 && req.rows > 0 {
+            session.resize(req.cols as usize, req.rows as usize);
+        }
+
+        let (cols, rows) = session.dimensions();
+        let info = SessionInfo {
+            session_id: session.id.clone(),
+            cols: cols as u32,
+            rows: rows as u32,
+            title: session.title(),
+            running: session.is_running(),
+            child_pid: session.child_pid().unwrap_or(0),
+            attached_clients: 1, // TODO: track properly
+        };
+
+        let initial_screen = if req.want_screen_snapshot {
+            Some(session.with_terminal(|term| screen_to_proto(term.screen(), false)))
+        } else {
+            None
+        };
+
+        Ok(Response::new(AttachSessionResponse {
+            session: Some(info),
+            initial_screen,
+        }))
+    }
+
+    async fn detach_session(
+        &self,
+        request: Request<DetachSessionRequest>,
+    ) -> Result<Response<DetachSessionResponse>, Status> {
+        let req = request.into_inner();
+
+        if !req.keep_running {
+            // Destroy the session
+            self.session_manager
+                .destroy_session(&req.session_id, None)
+                .map_err(Status::from)?;
+        }
+        // TODO: track detach state
+
+        Ok(Response::new(DetachSessionResponse { success: true }))
+    }
+
+    // ========================================================================
+    // Screen Update Streaming
+    // ========================================================================
+
+    type StreamScreenUpdatesStream =
+        Pin<Box<dyn Stream<Item = Result<ScreenUpdate, Status>> + Send + 'static>>;
+
+    async fn stream_screen_updates(
+        &self,
+        request: Request<StreamScreenUpdatesRequest>,
+    ) -> Result<Response<Self::StreamScreenUpdatesStream>, Status> {
+        let req = request.into_inner();
+        let session = self
+            .session_manager
+            .get_session(&req.session_id)
+            .map_err(Status::from)?;
+
+        // For now, send a full screen update on each ContentChanged event
+        let session_id = req.session_id.clone();
+        let rx = session.subscribe_events();
+        let session_ref = session.clone();
+        let mut seq: u64 = 0;
+
+        let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+            Ok(event) => {
+                if matches!(event, cterm_core::term::TerminalEvent::ContentChanged) {
+                    seq += 1;
+                    let screen_data =
+                        session_ref.with_terminal(|term| screen_to_proto(term.screen(), false));
+                    Some(Ok(ScreenUpdate {
+                        session_id: session_id.clone(),
+                        sequence: seq,
+                        update_type: Some(screen_update::UpdateType::FullScreen(
+                            FullScreenUpdate {
+                                screen: Some(screen_data),
+                            },
+                        )),
+                    }))
+                } else if matches!(event, cterm_core::term::TerminalEvent::TitleChanged(_)) {
+                    seq += 1;
+                    let title = session_ref.title();
+                    Some(Ok(ScreenUpdate {
+                        session_id: session_id.clone(),
+                        sequence: seq,
+                        update_type: Some(screen_update::UpdateType::Title(TitleUpdate { title })),
+                    }))
+                } else {
+                    None
+                }
+            }
+            Err(BroadcastStreamRecvError::Lagged(_)) => None,
+        });
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // ========================================================================
+    // Daemon Management
+    // ========================================================================
+
+    async fn get_daemon_info(
+        &self,
+        _request: Request<GetDaemonInfoRequest>,
+    ) -> Result<Response<GetDaemonInfoResponse>, Status> {
+        let hostname = gethostname();
+
+        Ok(Response::new(GetDaemonInfoResponse {
+            daemon_id: String::new(), // TODO
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            hostname,
+            session_count: self.session_manager.session_count() as u32,
+            client_count: 0, // TODO: track connected clients
+            uptime_secs: 0,  // TODO: track uptime
+        }))
+    }
+
+    async fn shutdown(
+        &self,
+        request: Request<ShutdownRequest>,
+    ) -> Result<Response<ShutdownResponse>, Status> {
+        let req = request.into_inner();
+
+        if !req.force && self.session_manager.session_count() > 0 {
+            return Ok(Response::new(ShutdownResponse {
+                success: false,
+                reason: "Active sessions exist. Use force=true to override.".to_string(),
+            }));
+        }
+
+        // TODO: trigger actual shutdown
+        log::info!("Shutdown requested (force={})", req.force);
+
+        Ok(Response::new(ShutdownResponse {
+            success: true,
+            reason: String::new(),
+        }))
+    }
+}
+
+fn gethostname() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        if unsafe { libc::gethostname(buf.as_mut_ptr() as *mut _, buf.len()) } == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            String::from_utf8_lossy(&buf[..len]).to_string()
+        } else {
+            "unknown".to_string()
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        "unknown".to_string()
     }
 }

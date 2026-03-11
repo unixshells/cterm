@@ -23,16 +23,14 @@
 
 pub mod bridge;
 pub mod cli;
-pub mod convert;
 pub mod error;
 pub mod server;
 pub mod service;
 pub mod session;
 
-/// Generated protobuf and gRPC code
-pub mod proto {
-    tonic::include_proto!("cterm.terminal");
-}
+// Re-export proto and convert from cterm-proto for backwards compatibility
+pub use cterm_proto::convert;
+pub use cterm_proto::proto;
 
 pub use error::{HeadlessError, Result};
 pub use server::{run_server, ServerConfig};
