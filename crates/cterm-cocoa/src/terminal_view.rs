@@ -1389,6 +1389,68 @@ impl TerminalView {
         this
     }
 
+    /// Create a terminal view backed by a reconnected daemon session.
+    ///
+    /// Like `from_daemon`, but also applies an initial screen snapshot so the
+    /// terminal shows the correct content immediately before streaming begins.
+    pub fn from_daemon_with_screen(
+        mtm: MainThreadMarker,
+        config: &Config,
+        theme: &Theme,
+        recon: cterm_app::daemon_reconnect::ReconnectedSession,
+    ) -> Retained<Self> {
+        let renderer = CGRenderer::new(
+            mtm,
+            &config.appearance.font.family,
+            config.appearance.font.size,
+            theme,
+            config.appearance.bold_is_bright,
+        );
+        let (cell_width, cell_height) = renderer.cell_size();
+
+        let mut terminal = Terminal::new(80, 24, ScreenConfig::default());
+        terminal.screen_mut().set_cell_height_hint(cell_height);
+        terminal.screen_mut().set_cell_width_hint(cell_width);
+
+        // Apply screen snapshot BEFORE wrapping in Arc<Mutex<>>
+        recon.apply_screen(&mut terminal);
+
+        // Set up write callback to forward input to daemon
+        let session = recon.handle;
+        let write_session = session.clone();
+        terminal.set_write_fn(Box::new(move |data: &[u8]| {
+            let session = write_session.clone();
+            let data = data.to_vec();
+            tokio::spawn(async move {
+                if let Err(e) = session.write_input(&data).await {
+                    log::error!("Failed to write to daemon: {}", e);
+                }
+            });
+            Ok(())
+        }));
+
+        let terminal = Arc::new(Mutex::new(terminal));
+
+        let (this, state) = Self::init_view(
+            mtm,
+            renderer,
+            terminal.clone(),
+            theme,
+            ViewInitOptions::default(),
+        );
+
+        let view_ptr = &*this as *const _ as usize;
+
+        // Start daemon output reader
+        let state_clone = state.clone();
+        std::thread::spawn(move || {
+            Self::read_daemon_loop(session, terminal, state_clone);
+        });
+
+        this.schedule_redraw_check(view_ptr, state);
+        this
+    }
+
     /// Background thread to read output from a daemon session.
     ///
     /// Creates a local tokio runtime, streams raw PTY output from the daemon,

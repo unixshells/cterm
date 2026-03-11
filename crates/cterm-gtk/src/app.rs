@@ -26,9 +26,46 @@ pub fn build_ui(app: &Application) {
     // Apply CSS styling
     apply_css(&theme);
 
-    // Create the main window
-    let window = CtermWindow::new(app, &config, &theme);
-    window.present();
+    // Try to reconnect to existing daemon sessions before creating a new one
+    let reconnected = {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+
+        rt.ok().and_then(|rt| {
+            let check = rt.block_on(cterm_app::daemon_reconnect::check_daemon_sessions());
+            if let cterm_app::daemon_reconnect::ReconnectCheck::Available(sessions) = check {
+                let running_count = sessions.iter().filter(|s| s.running).count();
+                if running_count > 0 {
+                    log::info!(
+                        "Found {} running daemon sessions, reconnecting...",
+                        running_count
+                    );
+                    rt.block_on(cterm_app::daemon_reconnect::reconnect_all_sessions())
+                        .ok()
+                        .filter(|r| !r.is_empty())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    };
+
+    if let Some(reconnected) = reconnected {
+        // Create window without initial tab, then add reconnected sessions as tabs
+        let window = CtermWindow::new_empty(app, &config, &theme);
+        for recon in reconnected {
+            window.add_reconnected_tab(recon);
+        }
+        log::info!("Reconnected to daemon sessions, skipping normal startup");
+        window.present();
+    } else {
+        // Normal startup - create the main window with a fresh session
+        let window = CtermWindow::new(app, &config, &theme);
+        window.present();
+    }
 }
 
 /// Get the theme based on configuration

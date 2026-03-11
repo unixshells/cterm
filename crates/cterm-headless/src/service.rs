@@ -421,7 +421,7 @@ impl TerminalService for TerminalServiceImpl {
         };
 
         let initial_screen = if req.want_screen_snapshot {
-            Some(session.with_terminal(|term| screen_to_proto(term.screen(), false)))
+            Some(session.with_terminal(|term| screen_to_proto(term.screen(), true)))
         } else {
             None
         };

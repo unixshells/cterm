@@ -421,6 +421,27 @@ impl CtermWindow {
         this
     }
 
+    /// Create a window connected to a reconnected daemon session (with screen snapshot)
+    pub fn from_daemon_with_screen(
+        mtm: MainThreadMarker,
+        config: &Config,
+        theme: &Theme,
+        recon: cterm_app::daemon_reconnect::ReconnectedSession,
+    ) -> Retained<Self> {
+        let title = if recon.title.is_empty() {
+            format!(
+                "Session: {}",
+                &recon.handle.session_id()[..8.min(recon.handle.session_id().len())]
+            )
+        } else {
+            recon.title.clone()
+        };
+        let this = Self::init_window(mtm, config, theme, &title, None);
+        let terminal_view = TerminalView::from_daemon_with_screen(mtm, config, theme, recon);
+        this.attach_terminal_view(terminal_view);
+        this
+    }
+
     /// Create a new tab connected to a daemon session (using native macOS window tabbing)
     pub fn create_daemon_tab(&self, session: cterm_client::SessionHandle) {
         let mtm = MainThreadMarker::from(self);

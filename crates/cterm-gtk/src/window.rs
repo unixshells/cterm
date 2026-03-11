@@ -202,6 +202,88 @@ impl CtermWindow {
         cterm_window
     }
 
+    /// Create a new window without an initial tab.
+    ///
+    /// Used for daemon reconnection where tabs will be added from existing sessions.
+    /// The caller must add at least one tab before presenting the window.
+    pub fn new_empty(app: &Application, config: &Config, theme: &Theme) -> Self {
+        // Calculate cell dimensions for initial window sizing
+        let cell_dims = calculate_initial_cell_dimensions(config);
+
+        // Calculate window size for 80x24 terminal plus chrome (menu bar ~30px, tab bar ~24px)
+        let chrome_height = 54;
+        let default_width = (cell_dims.width * 80.0).ceil() as i32 + 20;
+        let default_height = (cell_dims.height * 24.0).ceil() as i32 + chrome_height + 20;
+
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title("cterm")
+            .default_width(default_width)
+            .default_height(default_height)
+            .build();
+
+        let main_box = GtkBox::new(Orientation::Vertical, 0);
+
+        let menu_model = menu::create_menu_model_with_options(config.general.show_debug_menu);
+        let menu_bar = PopoverMenuBar::from_model(Some(&menu_model));
+        main_box.append(&menu_bar);
+
+        let tab_bar = TabBar::new();
+        main_box.append(tab_bar.widget());
+
+        let notification_bar = NotificationBar::new();
+        main_box.append(notification_bar.widget());
+
+        let quick_open = QuickOpenOverlay::new();
+        main_box.append(quick_open.widget());
+
+        let notebook = Notebook::builder()
+            .show_tabs(false)
+            .show_border(false)
+            .vexpand(true)
+            .hexpand(true)
+            .build();
+
+        main_box.append(&notebook);
+        window.set_child(Some(&main_box));
+
+        let shortcuts = ShortcutManager::from_config(&config.shortcuts);
+        let has_bell = Rc::new(RefCell::new(false));
+        let file_manager = Rc::new(RefCell::new(PendingFileManager::new()));
+
+        let cterm_window = Self {
+            window: window.clone(),
+            notebook: notebook.clone(),
+            tab_bar,
+            config: Rc::new(RefCell::new(config.clone())),
+            theme: theme.clone(),
+            shortcuts,
+            tabs: Rc::new(RefCell::new(Vec::new())),
+            next_tab_id: Rc::new(RefCell::new(0)),
+            menu_bar,
+            has_bell,
+            notification_bar,
+            file_manager,
+            quick_open,
+        };
+
+        cterm_window.setup_actions();
+        cterm_window.setup_quick_open();
+        cterm_window.setup_key_handler();
+        cterm_window.setup_focus_handler();
+        cterm_window.setup_terminal_focus_restore();
+        cterm_window.setup_notification_bar();
+
+        // No initial tab — caller will add tabs
+
+        cterm_window.tab_bar.update_visibility();
+        cterm_window.setup_tab_bar_callbacks();
+        cterm_window.setup_tab_switch_handler();
+        cterm_window.setup_close_request_handler();
+
+        cterm_window
+    }
+
     /// Set up window actions for the menu
     fn setup_actions(&self) {
         let window = &self.window;
@@ -1909,6 +1991,55 @@ impl CtermWindow {
             &self.file_manager,
             &self.notification_bar,
             cwd,
+        );
+    }
+
+    /// Add a tab for a reconnected daemon session (with screen snapshot).
+    ///
+    /// Used during startup reconnection to create tabs for existing daemon sessions.
+    pub fn add_reconnected_tab(&self, recon: cterm_app::daemon_reconnect::ReconnectedSession) {
+        let title = if recon.title.is_empty() {
+            format!(
+                "Session: {}",
+                &recon.handle.session_id()[..8.min(recon.handle.session_id().len())]
+            )
+        } else {
+            recon.title.clone()
+        };
+
+        let cfg = self.config.borrow();
+        let terminal = TerminalWidget::from_daemon_with_screen(recon, &cfg, &self.theme);
+        drop(cfg);
+
+        let tab_id = generate_tab_id(&self.next_tab_id);
+        let page_num = self
+            .notebook
+            .append_page(terminal.widget(), None::<&gtk4::Widget>);
+        self.tab_bar.add_tab(tab_id, &title);
+
+        setup_tab_callbacks(
+            &self.notebook,
+            &self.tabs,
+            &self.config,
+            &self.tab_bar,
+            &self.window,
+            &self.has_bell,
+            &self.file_manager,
+            &self.notification_bar,
+            &terminal,
+            tab_id,
+            false,
+        );
+
+        finalize_new_tab(
+            &self.notebook,
+            &self.tabs,
+            &self.tab_bar,
+            tab_id,
+            page_num,
+            title,
+            terminal,
+            false,
         );
     }
 

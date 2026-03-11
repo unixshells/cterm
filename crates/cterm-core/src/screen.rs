@@ -715,6 +715,11 @@ impl Screen {
         &self.scrollback
     }
 
+    /// Get mutable scrollback buffer
+    pub fn scrollback_mut(&mut self) -> &mut VecDeque<Row> {
+        &mut self.scrollback
+    }
+
     /// Get alternate grid if active
     pub fn alternate_grid(&self) -> Option<&Grid> {
         self.alternate_grid.as_ref()

@@ -981,6 +981,78 @@ impl TerminalWidget {
         widget
     }
 
+    /// Create a terminal widget backed by a reconnected daemon session.
+    ///
+    /// Like `from_daemon`, but also applies an initial screen snapshot so the
+    /// terminal shows the correct content immediately before streaming begins.
+    pub fn from_daemon_with_screen(
+        recon: cterm_app::daemon_reconnect::ReconnectedSession,
+        config: &Config,
+        theme: &Theme,
+    ) -> Self {
+        let font_family = config.appearance.font.family.clone();
+        let font_size = config.appearance.font.size;
+        let cell_dims = calculate_cell_dimensions(&font_family, font_size);
+
+        let drawing_area = DrawingArea::new();
+        drawing_area.set_can_focus(true);
+        drawing_area.set_focusable(true);
+        drawing_area.add_css_class("terminal");
+        drawing_area.set_vexpand(true);
+        drawing_area.set_hexpand(true);
+
+        let min_width = (cell_dims.width * 80.0).ceil() as i32;
+        let min_height = (cell_dims.height * 24.0).ceil() as i32;
+        drawing_area.set_size_request(min_width, min_height);
+
+        // Create a Terminal with no PTY
+        let mut terminal = Terminal::new(80, 24, ScreenConfig::default());
+
+        // Apply screen snapshot BEFORE wrapping in Arc<Mutex<>>
+        recon.apply_screen(&mut terminal);
+
+        // Set up write callback to forward input to daemon
+        let session = recon.handle;
+        let write_session = session.clone();
+        terminal.set_write_fn(Box::new(move |data: &[u8]| {
+            let session = write_session.clone();
+            let data = data.to_vec();
+            tokio::spawn(async move {
+                if let Err(e) = session.write_input(&data).await {
+                    log::error!("Failed to write to daemon: {}", e);
+                }
+            });
+            Ok(())
+        }));
+
+        let terminal = Arc::new(Mutex::new(terminal));
+        let cell_dims = Rc::new(RefCell::new(cell_dims));
+
+        let widget = Self {
+            drawing_area: drawing_area.clone(),
+            terminal: Arc::clone(&terminal),
+            theme: theme.clone(),
+            font_family,
+            font_size: Rc::new(RefCell::new(font_size)),
+            default_font_size: font_size,
+            cell_dims,
+            background_override: Rc::new(RefCell::new(None)),
+            on_exit: Rc::new(RefCell::new(None)),
+            on_bell: Rc::new(RefCell::new(None)),
+            on_title_change: Rc::new(RefCell::new(None)),
+            preedit: Rc::new(RefCell::new(PreeditState::default())),
+            on_file_transfer: Rc::new(RefCell::new(None)),
+        };
+
+        widget.setup_drawing();
+        widget.setup_input();
+        widget.setup_drop();
+        widget.setup_daemon_reader(session.clone());
+        widget.setup_daemon_resize(session);
+
+        widget
+    }
+
     /// Set up the daemon output reader — streams raw PTY output from the daemon
     /// and feeds it through the local terminal parser.
     fn setup_daemon_reader(&self, session: cterm_client::SessionHandle) {

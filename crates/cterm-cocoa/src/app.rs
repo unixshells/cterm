@@ -199,6 +199,64 @@ define_class!(
                 }
             }
 
+            // Try to reconnect to existing daemon sessions
+            {
+                let config = self.ivars().config.clone();
+                let theme = self.ivars().theme.clone();
+
+                // Check if daemon has existing sessions (non-blocking, don't auto-start)
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+
+                if let Ok(rt) = rt {
+                    let check = rt.block_on(cterm_app::daemon_reconnect::check_daemon_sessions());
+                    if let cterm_app::daemon_reconnect::ReconnectCheck::Available(sessions) = check {
+                        let running_count = sessions.iter().filter(|s| s.running).count();
+                        if running_count > 0 {
+                            log::info!("Found {} running daemon sessions, reconnecting...", running_count);
+                            // Reconnect to all sessions
+                            let reconnected = rt.block_on(cterm_app::daemon_reconnect::reconnect_all_sessions());
+                            if let Ok(reconnected) = reconnected {
+                                if !reconnected.is_empty() {
+                                    let mut first = true;
+                                    for recon in reconnected {
+                                        let window = CtermWindow::from_daemon_with_screen(
+                                            mtm, &config, &theme, recon,
+                                        );
+                                        self.ivars().windows.borrow_mut().push(window.clone());
+                                        if first {
+                                            window.makeKeyAndOrderFront(None);
+                                            first = false;
+                                        } else {
+                                            // Add as tab to first window
+                                            if let Some(first_win) = self.ivars().windows.borrow().first().cloned() {
+                                                first_win.addTabbedWindow_ordered(
+                                                    &window,
+                                                    objc2_app_kit::NSWindowOrderingMode::Above,
+                                                );
+                                            }
+                                            window.makeKeyAndOrderFront(None);
+                                        }
+                                    }
+                                    // Skip normal startup since we reconnected to existing sessions
+                                    #[allow(deprecated)]
+                                    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+                                    log::info!("Reconnected to daemon sessions, skipping normal startup");
+
+                                    // Start periodic state saving (only if running under watchdog)
+                                    #[cfg(unix)]
+                                    if get_watchdog_fd().is_some() {
+                                        self.start_state_save_timer(mtm);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Normal startup - create the main window
             log::debug!("Creating main window...");
             let window = CtermWindow::new(mtm, &self.ivars().config, &self.ivars().theme);

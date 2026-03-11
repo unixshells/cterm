@@ -6,6 +6,8 @@
 //! to the daemon's sessions.
 
 use cterm_client::{ClientError, DaemonConnection, SessionHandle};
+use cterm_core::Terminal;
+use cterm_proto::proto::GetScreenResponse;
 
 /// Information about available daemon sessions for reconnection
 pub struct DaemonSessionInfo {
@@ -56,21 +58,46 @@ pub async fn check_daemon_sessions() -> ReconnectCheck {
     }
 }
 
+/// A reconnected daemon session with its handle, title, and screen snapshot
+pub struct ReconnectedSession {
+    /// Handle to the daemon session
+    pub handle: SessionHandle,
+    /// Session title from the daemon
+    pub title: String,
+    /// Initial screen snapshot (if available)
+    pub screen: Option<GetScreenResponse>,
+}
+
+impl ReconnectedSession {
+    /// Apply the screen snapshot (if any) to a local terminal.
+    ///
+    /// This restores visible rows, scrollback, cursor position, title,
+    /// and terminal modes from the daemon's screen state. Should be called
+    /// BEFORE starting the output stream so the terminal shows correct
+    /// content immediately.
+    pub fn apply_screen(&self, terminal: &mut Terminal) {
+        if let Some(ref screen_data) = self.screen {
+            crate::daemon_session::apply_screen_snapshot(terminal, screen_data);
+        }
+    }
+}
+
 /// Reconnect to all running daemon sessions.
 ///
-/// Returns a list of SessionHandles, one per session. The caller is
-/// responsible for creating terminal widgets/tabs for each.
-pub async fn reconnect_all_sessions() -> Result<Vec<SessionHandle>, ClientError> {
+/// Returns a list of ReconnectedSessions including screen snapshots.
+/// The caller is responsible for creating terminal widgets/tabs for each.
+pub async fn reconnect_all_sessions() -> Result<Vec<ReconnectedSession>, ClientError> {
     let socket_path = cterm_client::default_socket_path();
     let conn = DaemonConnection::connect_unix(&socket_path, false).await?;
 
     let sessions = conn.list_sessions().await?;
-    let mut handles = Vec::new();
+    let mut results = Vec::new();
 
     for session_info in sessions {
         if !session_info.running {
             continue;
         }
+        let title = session_info.title.clone();
         match conn
             .attach_session(
                 &session_info.session_id,
@@ -79,8 +106,12 @@ pub async fn reconnect_all_sessions() -> Result<Vec<SessionHandle>, ClientError>
             )
             .await
         {
-            Ok((handle, _screen)) => {
-                handles.push(handle);
+            Ok((handle, screen)) => {
+                results.push(ReconnectedSession {
+                    handle,
+                    title,
+                    screen,
+                });
             }
             Err(e) => {
                 log::warn!(
@@ -92,5 +123,5 @@ pub async fn reconnect_all_sessions() -> Result<Vec<SessionHandle>, ClientError>
         }
     }
 
-    Ok(handles)
+    Ok(results)
 }
