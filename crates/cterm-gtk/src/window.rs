@@ -2543,6 +2543,12 @@ fn close_tab_by_id(
 
     let Some(index) = index else { return };
 
+    // Destroy the daemon session (kill the PTY process)
+    {
+        let tabs = tabs.borrow();
+        tabs[index].terminal.destroy_session();
+    }
+
     // Remove from notebook
     notebook.remove_page(Some(index as u32));
 

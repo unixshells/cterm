@@ -65,6 +65,7 @@ impl Default for ViewState {
 enum DaemonCommand {
     Write(Vec<u8>),
     Resize(u32, u32),
+    Destroy,
 }
 
 /// Terminal view state
@@ -151,6 +152,11 @@ define_class!(
             if new_window.is_none() {
                 log::debug!("View being removed from window, marking invalid");
                 self.ivars().state.view_invalid.store(true, Ordering::SeqCst);
+
+                // Destroy the daemon session (kill the PTY process)
+                if let Some(ref tx) = *self.ivars().daemon_cmd_tx.borrow() {
+                    let _ = tx.send(DaemonCommand::Destroy);
+                }
 
                 // Take and drop the PTY to close the master FD.
                 // This causes the background read thread to get an error/EOF and exit,
@@ -1497,7 +1503,7 @@ impl TerminalView {
                 }
             };
 
-            // Spawn command handler — drains write/resize commands and forwards to daemon
+            // Spawn command handler — drains write/resize/destroy commands and forwards to daemon
             let cmd_session = session.clone();
             tokio::spawn(async move {
                 let mut cmd_rx = cmd_rx;
@@ -1513,6 +1519,13 @@ impl TerminalView {
                             if let Err(e) = cmd_session.resize(cols, rows).await {
                                 log::error!("Failed to resize daemon session: {}", e);
                             }
+                        }
+                        DaemonCommand::Destroy => {
+                            log::info!("Destroying daemon session");
+                            if let Err(e) = cmd_session.destroy().await {
+                                log::error!("Failed to destroy daemon session: {}", e);
+                            }
+                            break;
                         }
                     }
                 }

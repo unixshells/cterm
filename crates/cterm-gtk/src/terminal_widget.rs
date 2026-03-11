@@ -57,6 +57,8 @@ pub struct TerminalWidget {
     on_bell: EventCallback,
     on_title_change: TitleCallback,
     on_file_transfer: FileTransferCallback,
+    /// Command channel for daemon I/O — None for local PTY sessions
+    daemon_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<DaemonCommand>>,
 }
 
 impl TerminalWidget {
@@ -69,6 +71,14 @@ impl TerminalWidget {
     #[allow(dead_code)]
     pub fn cell_dimensions(&self) -> CellDimensions {
         *self.cell_dims.borrow()
+    }
+
+    /// Destroy the daemon session (kill the PTY process).
+    /// Called when a tab is explicitly closed by the user.
+    pub fn destroy_session(&self) {
+        if let Some(ref tx) = self.daemon_cmd_tx {
+            let _ = tx.send(DaemonCommand::Destroy);
+        }
     }
 
     /// Set callback for when the terminal process exits
@@ -935,6 +945,7 @@ impl TerminalWidget {
             on_title_change: Rc::new(RefCell::new(None)),
             preedit: Rc::new(RefCell::new(PreeditState::default())),
             on_file_transfer: Rc::new(RefCell::new(None)),
+            daemon_cmd_tx: Some(cmd_tx.clone()),
         };
 
         widget.setup_drawing();
@@ -1006,6 +1017,7 @@ impl TerminalWidget {
             on_title_change: Rc::new(RefCell::new(None)),
             preedit: Rc::new(RefCell::new(PreeditState::default())),
             on_file_transfer: Rc::new(RefCell::new(None)),
+            daemon_cmd_tx: Some(cmd_tx.clone()),
         };
 
         widget.setup_drawing();
@@ -1061,7 +1073,7 @@ impl TerminalWidget {
                     }
                 };
 
-                // Spawn command handler — drains write/resize commands and forwards to daemon
+                // Spawn command handler — drains write/resize/destroy commands and forwards to daemon
                 let cmd_session = session.clone();
                 tokio::spawn(async move {
                     let mut cmd_rx = cmd_rx;
@@ -1077,6 +1089,13 @@ impl TerminalWidget {
                                 if let Err(e) = cmd_session.resize(cols, rows).await {
                                     log::error!("Failed to resize daemon session: {}", e);
                                 }
+                            }
+                            DaemonCommand::Destroy => {
+                                log::info!("Destroying daemon session");
+                                if let Err(e) = cmd_session.destroy().await {
+                                    log::error!("Failed to destroy daemon session: {}", e);
+                                }
+                                break;
                             }
                         }
                     }
@@ -1279,6 +1298,7 @@ enum PtyMessage {
 enum DaemonCommand {
     Write(Vec<u8>),
     Resize(u32, u32),
+    Destroy,
 }
 
 /// Rendering parameters for draw_terminal
