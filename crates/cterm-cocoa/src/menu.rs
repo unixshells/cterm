@@ -232,6 +232,29 @@ fn create_file_menu(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
         NSEventModifierFlags::Command.union(NSEventModifierFlags::Shift),
     ));
 
+    // Sessions submenu (daemon)
+    let sessions_submenu = NSMenu::new(mtm);
+    sessions_submenu.setTitle(&NSString::from_str("Sessions"));
+
+    sessions_submenu.addItem(&create_menu_item(
+        mtm,
+        "Attach to Session...",
+        Some(sel!(attachToSession:)),
+        "",
+    ));
+
+    sessions_submenu.addItem(&create_menu_item(
+        mtm,
+        "SSH Remote...",
+        Some(sel!(sshConnect:)),
+        "",
+    ));
+
+    let sessions_item = NSMenuItem::new(mtm);
+    sessions_item.setTitle(&NSString::from_str("Sessions"));
+    sessions_item.setSubmenu(Some(&sessions_submenu));
+    menu.addItem(&sessions_item);
+
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     // Close Tab

@@ -702,6 +702,87 @@ define_class!(
             log::info!("Opened devcontainer tab");
         }
 
+        /// Show session picker and attach to a daemon session
+        #[unsafe(method(attachToSession:))]
+        fn action_attach_to_session(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let config = self.ivars().config.clone();
+            let theme = self.ivars().theme.clone();
+
+            // Run session listing in background
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+
+                let sessions = match rt {
+                    Ok(rt) => rt.block_on(async {
+                        let conn = cterm_client::DaemonConnection::connect_local().await?;
+                        conn.list_sessions().await
+                    }),
+                    Err(e) => {
+                        log::error!("Failed to create runtime: {}", e);
+                        return;
+                    }
+                };
+
+                match sessions {
+                    Ok(sessions) => {
+                        // For now, attach to the first running session
+                        if let Some(session_info) = sessions.iter().find(|s| s.running) {
+                            let session_id = session_info.session_id.clone();
+                            let cols = session_info.cols;
+                            let rows = session_info.rows;
+
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build();
+
+                            if let Ok(rt) = rt {
+                                match rt.block_on(async {
+                                    let conn =
+                                        cterm_client::DaemonConnection::connect_local().await?;
+                                    let (handle, _) =
+                                        conn.attach_session(&session_id, cols, rows).await?;
+                                    Ok::<_, cterm_client::ClientError>(handle)
+                                }) {
+                                    Ok(handle) => {
+                                        // Create the tab on the main thread
+                                        dispatch2::Queue::main().exec_async(move || {
+                                            let mtm = unsafe {
+                                                MainThreadMarker::new_unchecked()
+                                            };
+                                            let window = CtermWindow::from_daemon(
+                                                mtm, &config, &theme, handle,
+                                            );
+                                            window.makeKeyAndOrderFront(None);
+                                            let app = NSApplication::sharedApplication(mtm);
+                                            if let Some(delegate) = app.delegate() {
+                                                let _: () = unsafe {
+                                                    msg_send![&*delegate, registerWindow: &*window]
+                                                };
+                                            }
+                                        });
+                                    }
+                                    Err(e) => log::error!("Failed to attach: {}", e),
+                                }
+                            }
+                        } else {
+                            log::info!("No running daemon sessions to attach to");
+                        }
+                    }
+                    Err(e) => log::error!("Failed to list sessions: {}", e),
+                }
+            });
+        }
+
+        /// Show SSH connection dialog
+        #[unsafe(method(sshConnect:))]
+        fn action_ssh_connect(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            log::info!("SSH connect requested (not yet implemented for macOS native dialogs)");
+            // TODO: implement native macOS SSH connection dialog
+        }
+
         /// Called by windows when they close to remove from tracking
         #[unsafe(method(windowDidClose:))]
         fn window_did_close(&self, window: &CtermWindow) {
