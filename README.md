@@ -172,7 +172,6 @@ keep_open = true
 | `background_color` | Lock the background color (overrides theme, hex `#RRGGBB`) |
 | `keep_open` | Keep the tab open after the process exits |
 | `unique` | Singleton mode — only one instance of this tab can exist at a time |
-| `auto_start` | Automatically open this tab when cterm starts |
 | `env` | Extra environment variables (table) |
 | `docker` | Docker container config (see below) |
 | `ssh` | SSH remote config (see below) |

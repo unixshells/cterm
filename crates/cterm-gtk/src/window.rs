@@ -2139,7 +2139,7 @@ fn finalize_new_tab(
     }
 }
 
-/// Create a new terminal tab
+/// Create a new terminal tab (daemon-backed via ctermd)
 #[allow(clippy::too_many_arguments)]
 fn create_new_tab(
     notebook: &Notebook,
@@ -2168,45 +2168,36 @@ fn create_new_tab(
         .unwrap_or("Terminal")
         .to_string();
 
-    let terminal = match TerminalWidget::new_with_cwd(&cfg, theme, cwd) {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Failed to create terminal: {}", e);
-            return;
-        }
+    // Build daemon session options
+    let opts = cterm_client::CreateSessionOpts {
+        cols: 80,
+        rows: 24,
+        shell: cfg.general.default_shell.clone(),
+        args: cfg.general.shell_args.clone(),
+        cwd,
+        ..Default::default()
     };
+    drop(cfg);
 
-    let tab_id = generate_tab_id(next_tab_id);
-    let page_num = notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
-    tab_bar.add_tab(tab_id, &initial_title);
-
-    setup_tab_callbacks(
+    spawn_daemon_tab(
         notebook,
         tabs,
+        next_tab_id,
         config,
+        theme,
         tab_bar,
         window,
         has_bell,
         file_manager,
         notification_bar,
-        &terminal,
-        tab_id,
-        false,
-    );
-
-    finalize_new_tab(
-        notebook,
-        tabs,
-        tab_bar,
-        tab_id,
-        page_num,
+        opts,
         initial_title,
-        terminal,
+        None,
         false,
     );
 }
 
-/// Create a new Docker terminal tab
+/// Create a new Docker terminal tab (daemon-backed via ctermd)
 #[allow(clippy::too_many_arguments)]
 fn create_docker_tab(
     notebook: &Notebook,
@@ -2223,54 +2214,133 @@ fn create_docker_tab(
     args: &[String],
     title: &str,
 ) {
-    let mut cfg = config.borrow().clone();
-    cfg.general.default_shell = Some(command.to_string());
-    cfg.general.shell_args = args.to_vec();
-
-    let terminal = match TerminalWidget::new(&cfg, theme) {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Failed to create Docker terminal: {}", e);
-            return;
-        }
+    let opts = cterm_client::CreateSessionOpts {
+        cols: 80,
+        rows: 24,
+        shell: Some(command.to_string()),
+        args: args.to_vec(),
+        ..Default::default()
     };
 
-    let tab_id = generate_tab_id(next_tab_id);
-    let page_num = notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
-    tab_bar.add_tab(tab_id, title);
-    tab_bar.set_color(tab_id, Some("#0db7ed"));
-    // Store the color in the tab entry after it's created below
-    let docker_color = Some("#0db7ed".to_string());
-
-    setup_tab_callbacks(
+    spawn_daemon_tab(
         notebook,
         tabs,
+        next_tab_id,
         config,
+        theme,
         tab_bar,
         window,
         has_bell,
         file_manager,
         notification_bar,
-        &terminal,
-        tab_id,
-        false,
-    );
-
-    finalize_new_tab(
-        notebook,
-        tabs,
-        tab_bar,
-        tab_id,
-        page_num,
+        opts,
         title.to_string(),
-        terminal,
+        Some("#0db7ed".to_string()),
         false,
     );
+}
 
-    // Store the docker color in the tab entry
-    if let Some(tab) = tabs.borrow_mut().iter_mut().find(|t| t.id == tab_id) {
-        tab.color = docker_color;
-    }
+/// Spawn a new daemon-backed tab: connects to ctermd, creates session, and wires up the tab
+#[allow(clippy::too_many_arguments)]
+fn spawn_daemon_tab(
+    notebook: &Notebook,
+    tabs: &Rc<RefCell<Vec<TabEntry>>>,
+    next_tab_id: &Rc<RefCell<u64>>,
+    config: &Rc<RefCell<Config>>,
+    theme: &Theme,
+    tab_bar: &TabBar,
+    window: &ApplicationWindow,
+    has_bell: &Rc<RefCell<bool>>,
+    file_manager: &Rc<RefCell<PendingFileManager>>,
+    notification_bar: &NotificationBar,
+    opts: cterm_client::CreateSessionOpts,
+    title: String,
+    color: Option<String>,
+    keep_open: bool,
+) {
+    let notebook = notebook.clone();
+    let tabs = Rc::clone(tabs);
+    let next_tab_id = Rc::clone(next_tab_id);
+    let config = Rc::clone(config);
+    let theme = theme.clone();
+    let tab_bar = tab_bar.clone();
+    let window = window.clone();
+    let has_bell = Rc::clone(has_bell);
+    let file_manager = Rc::clone(file_manager);
+    let notification_bar = notification_bar.clone();
+
+    let (tx, rx) = glib::MainContext::channel::<DaemonAttachResult>(glib::Priority::DEFAULT);
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+
+        let result = match rt {
+            Ok(rt) => rt.block_on(async {
+                let conn = cterm_client::DaemonConnection::connect_local().await?;
+                let session = conn.create_session(opts).await?;
+                Ok(session)
+            }),
+            Err(e) => Err(cterm_client::ClientError::Connection(e.to_string())),
+        };
+
+        let _ = tx.send(result);
+    });
+
+    rx.attach(None, move |result| {
+        match result {
+            Ok(session) => {
+                let cfg = config.borrow();
+                let terminal = TerminalWidget::from_daemon(session, &cfg, &theme);
+                drop(cfg);
+
+                let tab_id = generate_tab_id(&next_tab_id);
+                let page_num = notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
+                tab_bar.add_tab(tab_id, &title);
+
+                if let Some(ref c) = color {
+                    tab_bar.set_color(tab_id, Some(c));
+                }
+
+                setup_tab_callbacks(
+                    &notebook,
+                    &tabs,
+                    &config,
+                    &tab_bar,
+                    &window,
+                    &has_bell,
+                    &file_manager,
+                    &notification_bar,
+                    &terminal,
+                    tab_id,
+                    keep_open,
+                );
+
+                finalize_new_tab(
+                    &notebook,
+                    &tabs,
+                    &tab_bar,
+                    tab_id,
+                    page_num,
+                    title.clone(),
+                    terminal,
+                    false,
+                );
+
+                // Store color in tab entry
+                if color.is_some() {
+                    if let Some(tab) = tabs.borrow_mut().iter_mut().find(|t| t.id == tab_id) {
+                        tab.color = color.clone();
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to create daemon session: {}", e);
+            }
+        }
+        glib::ControlFlow::Break
+    });
 }
 
 /// Create a new daemon-backed tab by attaching to a session
@@ -2400,56 +2470,49 @@ fn create_tab_from_template(
     }
 
     let cfg = config.borrow();
-    let terminal = match TerminalWidget::from_template(&cfg, theme, template) {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Failed to create terminal from template: {}", e);
-            return;
-        }
+
+    // Build daemon session options from template
+    let opts = cterm_client::CreateSessionOpts {
+        cols: 80,
+        rows: 24,
+        shell: template
+            .command
+            .clone()
+            .or_else(|| cfg.general.default_shell.clone()),
+        args: if template.args.is_empty() && template.command.is_none() {
+            cfg.general.shell_args.clone()
+        } else {
+            template.args.clone()
+        },
+        cwd: template
+            .working_directory
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        env: template
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        ..Default::default()
     };
+    drop(cfg);
 
-    let tab_id = generate_tab_id(next_tab_id);
-    let page_num = notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
-    tab_bar.add_tab(tab_id, &template.name);
-
-    let tab_color = template.color.clone();
-    if let Some(ref color) = tab_color {
-        tab_bar.set_color(tab_id, Some(color));
-    }
-
-    setup_tab_callbacks(
+    spawn_daemon_tab(
         notebook,
         tabs,
+        next_tab_id,
         config,
+        theme,
         tab_bar,
         window,
         has_bell,
         file_manager,
         notification_bar,
-        &terminal,
-        tab_id,
+        opts,
+        template.name.clone(),
+        template.color.clone(),
         template.keep_open,
     );
-
-    finalize_new_tab(
-        notebook,
-        tabs,
-        tab_bar,
-        tab_id,
-        page_num,
-        template.name.clone(),
-        terminal,
-        true,
-    );
-
-    // Store the template color in the tab entry
-    if tab_color.is_some() {
-        if let Some(tab) = tabs.borrow_mut().iter_mut().find(|t| t.id == tab_id) {
-            tab.color = tab_color;
-        }
-    }
-
-    log::info!("Created tab from template: {}", template.name);
 }
 
 /// Close current tab (with confirmation if process is running)

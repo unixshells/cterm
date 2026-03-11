@@ -163,166 +163,40 @@ define_class!(
             let mtm = MainThreadMarker::from(self);
 
             // Check for crash recovery
+            // TODO: Crash recovery needs daemon-based session reconnection.
+            // Direct PTY recovery has been removed as all sessions now go through ctermd.
             #[cfg(unix)]
-            let recovery_fds = take_recovery_fds();
-
-            #[cfg(unix)]
-            if !recovery_fds.is_empty() {
-                log::info!("Recovering {} terminals from crash", recovery_fds.len());
-
-                // Try to read saved crash state for display restoration
-                let saved_state = cterm_app::read_crash_state().ok();
-
-                // Build a map from watchdog FD ID to saved terminal state
-                let state_map: std::collections::HashMap<u64, &cterm_app::upgrade::TabUpgradeState> =
-                    if let Some(ref state) = saved_state {
-                        state
-                            .state
-                            .windows
-                            .iter()
-                            .flat_map(|w| w.tabs.iter())
-                            .filter(|t| t.watchdog_fd_id > 0)
-                            .map(|t| (t.watchdog_fd_id, t))
-                            .collect()
-                    } else {
-                        std::collections::HashMap::new()
-                    };
-
-                log::info!(
-                    "Found {} saved terminal states to restore",
-                    state_map.len()
-                );
-
-                // Check for crash marker to show recovery message
-                if let Some((signal, pid)) = cterm_app::read_crash_marker() {
+            {
+                let recovery_fds = take_recovery_fds();
+                if !recovery_fds.is_empty() {
                     log::warn!(
-                        "Recovered from crash: signal {}, previous PID {}",
-                        signal,
-                        pid
+                        "Crash recovery received {} FDs, but direct PTY recovery is no longer supported. \
+                         Sessions should be recovered via daemon reconnection.",
+                        recovery_fds.len()
                     );
-                    // Show crash recovery dialog
-                    let wants_report = crate::dialogs::show_crash_recovery(
-                        mtm,
-                        signal,
-                        pid as i32,
-                        recovery_fds.len(),
-                    );
-                    if wants_report {
-                        // Open GitHub issues page for crash reporting
-                        let title = format!("Crash report (signal {})", signal);
-                        let body = format!(
-                            "## Crash Details\n\n- Signal: {}\n- Previous PID: {}\n- Recovered terminals: {}\n\n## Description\n\nPlease describe what you were doing when the crash occurred:\n\n",
-                            signal, pid, recovery_fds.len()
-                        );
-                        // Simple URL encoding for the query parameters
-                        fn url_encode(s: &str) -> String {
-                            let mut result = String::with_capacity(s.len() * 3);
-                            for c in s.chars() {
-                                match c {
-                                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => result.push(c),
-                                    ' ' => result.push('+'),
-                                    _ => {
-                                        for byte in c.to_string().as_bytes() {
-                                            result.push_str(&format!("%{:02X}", byte));
-                                        }
-                                    }
-                                }
-                            }
-                            result
-                        }
-                        let url_str = format!(
-                            "https://github.com/KarpelesLab/cterm/issues/new?title={}&body={}",
-                            url_encode(&title),
-                            url_encode(&body)
-                        );
-                        if let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(&url_str)) {
-                            unsafe {
-                                let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
-                                workspace.openURL(&url);
-                            }
-                        }
+                    // Close the recovered FDs since we can't use them directly
+                    for recovered in &recovery_fds {
+                        unsafe { libc::close(recovered.fd) };
                     }
+                    let _ = cterm_app::clear_crash_state();
                 }
-
-                // Create windows for recovered terminals
-                for (i, recovered) in recovery_fds.iter().enumerate() {
-                    let window = CtermWindow::from_recovered_fd(
-                        mtm,
-                        &self.ivars().config,
-                        &self.ivars().theme,
-                        recovered,
-                    );
-
-                    // Try to restore display state and title if we have saved state for this FD
-                    if let Some(tab_state) = state_map.get(&recovered.id) {
-                        if let Some(terminal_view) = window.active_terminal() {
-                            terminal_view.restore_display_state(&tab_state.terminal);
-                            // Restore template name and title lock if present
-                            if tab_state.custom_title.is_some()
-                                || tab_state.template_name.is_some()
-                            {
-                                terminal_view.set_title_locked(true);
-                            }
-                            if tab_state.template_name.is_some() {
-                                terminal_view.set_template_name(tab_state.template_name.clone());
-                            }
-                            log::info!(
-                                "Restored display state for terminal (watchdog_fd_id={})",
-                                recovered.id
-                            );
-                        }
-                        // Restore window title
-                        window.setTitle(&NSString::from_str(&tab_state.title));
-                        // Restore tab color
-                        if let Some(ref color) = tab_state.color {
-                            window.set_tab_color(Some(color));
-                        }
-                    }
-
-                    // Disable tabbing to prevent auto-merging into existing windows
-                    window.setTabbingMode(objc2_app_kit::NSWindowTabbingMode::Disallowed);
-
-                    self.ivars().windows.borrow_mut().push(window.clone());
-
-                    if i == 0 {
-                        // Make first window key
-                        window.makeKeyAndOrderFront(None);
-                    } else {
-                        // Show as separate window (not as tab)
-                        window.makeKeyAndOrderFront(None);
-                    }
-
-                    // Re-enable tabbing for future tabs in this window
-                    window.setTabbingMode(objc2_app_kit::NSWindowTabbingMode::Preferred);
-                }
-
-                // Clear crash state file after successful recovery
-                let _ = cterm_app::clear_crash_state();
-
-                // Start periodic state saving
-                self.start_state_save_timer(mtm);
-
-                // Activate the app to bring window to front
-                #[allow(deprecated)]
-                NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-
-                return;
             }
 
             // Check for seamless upgrade state
+            // TODO: Seamless upgrade needs daemon-based session reconnection.
+            // Direct PTY restoration has been removed as all sessions now go through ctermd.
             #[cfg(unix)]
             if let Some((upgrade_state, fds)) = take_upgrade_state() {
-                log::info!(
-                    "Restoring {} windows from seamless upgrade",
-                    upgrade_state.windows.len()
+                log::warn!(
+                    "Seamless upgrade received {} windows with {} FDs, but direct PTY restoration \
+                     is no longer supported. Sessions should be recovered via daemon reconnection.",
+                    upgrade_state.windows.len(),
+                    fds.len()
                 );
-                self.restore_from_upgrade(mtm, upgrade_state, fds);
-
-                // Activate the app to bring window to front
-                #[allow(deprecated)]
-                NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-
-                return;
+                // Close the transferred FDs since we can't use them directly
+                for fd in &fds {
+                    unsafe { libc::close(*fd) };
+                }
             }
 
             // Normal startup - create the main window
@@ -940,163 +814,57 @@ impl AppDelegate {
             }
         }
 
-        // Create a new tab from the template
-        let window =
-            CtermWindow::from_template(mtm, &self.ivars().config, &self.ivars().theme, template);
-        self.ivars().windows.borrow_mut().push(window.clone());
+        // Prepare working directory (clone from git if needed)
+        if let Some(ref working_dir) = template.working_directory {
+            if let Err(e) =
+                cterm_app::prepare_working_directory(working_dir, template.git_remote.as_deref())
+            {
+                log::error!("Failed to prepare working directory: {}", e);
+            }
+        }
 
-        // If there's a key window, add as a tab to it; otherwise show standalone
+        let config = self.ivars().config.clone();
+        let theme = self.ivars().theme.clone();
+
+        let opts = cterm_client::CreateSessionOpts {
+            cols: 80,
+            rows: 24,
+            shell: template
+                .command
+                .clone()
+                .or_else(|| config.general.default_shell.clone()),
+            args: if template.args.is_empty() && template.command.is_none() {
+                config.general.shell_args.clone()
+            } else {
+                template.args.clone()
+            },
+            cwd: template
+                .working_directory
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            env: template
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            ..Default::default()
+        };
+
+        let template_name = template.name.clone();
+        let template_color = template.color.clone();
+
+        // If there's a key window, add as a tab; otherwise create standalone
         let app = NSApplication::sharedApplication(mtm);
         if let Some(key_window) = app.keyWindow() {
-            // Add as a tab to the existing key window
-            key_window.addTabbedWindow_ordered(&window, objc2_app_kit::NSWindowOrderingMode::Above);
-            window.makeKeyAndOrderFront(None);
-            log::info!(
-                "Created new tab from template: {} (added to existing window)",
-                template.name
-            );
+            let window_ptr = Retained::as_ptr(&key_window) as *const CtermWindow;
+            let cterm_window: &CtermWindow = unsafe { &*window_ptr };
+            cterm_window.spawn_daemon_tab(opts, Some(template_name), template_color);
         } else {
+            // No key window — create a new standalone daemon-backed window
+            let window =
+                CtermWindow::new_daemon(mtm, &config, &theme, opts, template_name, template_color);
+            self.ivars().windows.borrow_mut().push(window.clone());
             window.makeKeyAndOrderFront(None);
-            log::info!(
-                "Created new tab from template: {} (standalone window)",
-                template.name
-            );
-        }
-
-        // Apply tab color after window is visible (tab property is only available then)
-        if let Some(ref color) = template.color {
-            window.set_tab_color(Some(color));
-        }
-    }
-
-    /// Restore windows from seamless upgrade state
-    #[cfg(unix)]
-    fn restore_from_upgrade(
-        &self,
-        mtm: MainThreadMarker,
-        state: cterm_app::upgrade::UpgradeState,
-        fds: Vec<std::os::unix::io::RawFd>,
-    ) {
-        use cterm_core::screen::{Screen, ScreenConfig};
-        use cterm_core::term::Terminal;
-        use cterm_core::Pty;
-        use objc2_foundation::{NSPoint, NSRect, NSSize};
-
-        log::info!("Reconstructing {} windows", state.windows.len());
-
-        for (window_idx, window_state) in state.windows.into_iter().enumerate() {
-            log::info!(
-                "Window {}: {}x{} at ({}, {}), {} tabs",
-                window_idx,
-                window_state.width,
-                window_state.height,
-                window_state.x,
-                window_state.y,
-                window_state.tabs.len()
-            );
-
-            // Restore all tabs in this window
-            let mut first_window: Option<Retained<CtermWindow>> = None;
-
-            for (tab_idx, tab_state) in window_state.tabs.into_iter().enumerate() {
-                // Get the PTY FD for this tab
-                if tab_state.pty_fd_index >= fds.len() {
-                    log::error!(
-                        "PTY FD index {} out of range (max {})",
-                        tab_state.pty_fd_index,
-                        fds.len()
-                    );
-                    continue;
-                }
-
-                let pty_fd = fds[tab_state.pty_fd_index];
-
-                // Reconstruct Pty from the FD and child PID
-                let pty = unsafe { Pty::from_raw_fd(pty_fd, tab_state.child_pid) };
-
-                // Reconstruct Screen from the terminal state
-                let term_state = &tab_state.terminal;
-                let screen_config = ScreenConfig {
-                    scrollback_lines: self.ivars().config.general.scrollback_lines,
-                };
-
-                let screen = Screen::from_upgrade_state(
-                    term_state.grid.clone(),
-                    term_state.scrollback.clone(),
-                    term_state.alternate_grid.clone(),
-                    term_state.cursor.clone(),
-                    term_state.saved_cursor.clone(),
-                    term_state.alt_saved_cursor.clone(),
-                    term_state.scroll_region,
-                    term_state.style.clone(),
-                    term_state.modes.clone(),
-                    term_state.title.clone(),
-                    term_state.scroll_offset,
-                    term_state.tab_stops.clone(),
-                    screen_config,
-                );
-
-                // Create Terminal with the restored screen and PTY
-                let terminal = Terminal::from_restored(screen, pty);
-
-                // Create the window with the restored terminal
-                let window = CtermWindow::from_restored(
-                    mtm,
-                    &self.ivars().config,
-                    &self.ivars().theme,
-                    terminal,
-                    tab_state.color.clone(),
-                );
-
-                // Restore window title
-                if !tab_state.title.is_empty() {
-                    window.setTitle(&NSString::from_str(&tab_state.title));
-                }
-
-                // Restore custom title lock and template_name if present
-                if let Some(terminal_view) = window.active_terminal() {
-                    if tab_state.custom_title.is_some() || tab_state.template_name.is_some() {
-                        terminal_view.set_title_locked(true);
-                    }
-                    if tab_state.template_name.is_some() {
-                        terminal_view.set_template_name(tab_state.template_name.clone());
-                    }
-                }
-
-                // Track this window
-                self.ivars().windows.borrow_mut().push(window.clone());
-
-                if let Some(ref first) = first_window {
-                    // Add as a tab to the first window
-                    first.addTabbedWindow_ordered(
-                        &window,
-                        objc2_app_kit::NSWindowOrderingMode::Above,
-                    );
-                    log::info!(
-                        "Window {}, tab {} restored as tabbed window",
-                        window_idx,
-                        tab_idx
-                    );
-                } else {
-                    // First tab - restore window position and size, then show it
-                    let frame = NSRect::new(
-                        NSPoint::new(window_state.x as f64, window_state.y as f64),
-                        NSSize::new(window_state.width as f64, window_state.height as f64),
-                    );
-                    window.setFrame_display(frame, true);
-                    window.makeKeyAndOrderFront(None);
-                    first_window = Some(window.clone());
-                    log::info!(
-                        "Window {}, tab {} restored as main window",
-                        window_idx,
-                        tab_idx
-                    );
-                }
-            }
-
-            if first_window.is_some() {
-                log::info!("Window {} restored successfully", window_idx);
-            }
         }
     }
 

@@ -35,7 +35,6 @@ pub struct TabTemplatesWindowIvars {
     background_color_well: RefCell<Option<Retained<NSColorWell>>>,
     theme_field: RefCell<Option<Retained<NSTextField>>>,
     unique_checkbox: RefCell<Option<Retained<NSButton>>>,
-    auto_start_checkbox: RefCell<Option<Retained<NSButton>>>,
     keep_open_checkbox: RefCell<Option<Retained<NSButton>>>,
     // Docker fields
     docker_mode_popup: RefCell<Option<Retained<NSPopUpButton>>>,
@@ -245,7 +244,6 @@ impl TabTemplatesWindow {
             background_color_well: RefCell::new(None),
             theme_field: RefCell::new(None),
             unique_checkbox: RefCell::new(None),
-            auto_start_checkbox: RefCell::new(None),
             keep_open_checkbox: RefCell::new(None),
             // Docker fields
             docker_mode_popup: RefCell::new(None),
@@ -503,17 +501,6 @@ impl TabTemplatesWindow {
         };
         stack.addView_inGravity(&unique_cb, NSStackViewGravity::Top);
         *self.ivars().unique_checkbox.borrow_mut() = Some(unique_cb);
-
-        let auto_start_cb = unsafe {
-            NSButton::checkboxWithTitle_target_action(
-                &NSString::from_str("Auto-start on launch"),
-                Some(self),
-                Some(sel!(checkboxChanged:)),
-                mtm,
-            )
-        };
-        stack.addView_inGravity(&auto_start_cb, NSStackViewGravity::Top);
-        *self.ivars().auto_start_checkbox.borrow_mut() = Some(auto_start_cb);
 
         let keep_open_cb = unsafe {
             NSButton::checkboxWithTitle_target_action(
@@ -919,9 +906,6 @@ impl TabTemplatesWindow {
             if let Some(cb) = self.ivars().unique_checkbox.borrow().as_ref() {
                 cb.setState(if template.unique { 1 } else { 0 });
             }
-            if let Some(cb) = self.ivars().auto_start_checkbox.borrow().as_ref() {
-                cb.setState(if template.auto_start { 1 } else { 0 });
-            }
             if let Some(cb) = self.ivars().keep_open_checkbox.borrow().as_ref() {
                 cb.setState(if template.keep_open { 1 } else { 0 });
             }
@@ -1115,9 +1099,6 @@ impl TabTemplatesWindow {
         if let Some(cb) = self.ivars().unique_checkbox.borrow().as_ref() {
             cb.setState(0);
         }
-        if let Some(cb) = self.ivars().auto_start_checkbox.borrow().as_ref() {
-            cb.setState(0);
-        }
         if let Some(cb) = self.ivars().keep_open_checkbox.borrow().as_ref() {
             cb.setState(0);
         }
@@ -1281,9 +1262,6 @@ impl TabTemplatesWindow {
             }
             if let Some(cb) = self.ivars().unique_checkbox.borrow().as_ref() {
                 template.unique = cb.state() != 0;
-            }
-            if let Some(cb) = self.ivars().auto_start_checkbox.borrow().as_ref() {
-                template.auto_start = cb.state() != 0;
             }
             if let Some(cb) = self.ivars().keep_open_checkbox.borrow().as_ref() {
                 template.keep_open = cb.state() != 0;

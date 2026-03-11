@@ -30,7 +30,6 @@ struct TemplateWidgets {
     color_button: ColorButton,
     theme_entry: Entry,
     unique_check: CheckButton,
-    auto_start_check: CheckButton,
     keep_open_check: CheckButton,
     // Docker tab
     docker_mode_combo: ComboBoxText,
@@ -277,7 +276,6 @@ fn create_widgets(notebook: &Notebook) -> TemplateWidgets {
         color_button,
         theme_entry,
         unique_check,
-        auto_start_check,
         keep_open_check,
     ) = create_general_tab();
     notebook.append_page(&general_page, Some(&Label::new(Some("General"))));
@@ -329,7 +327,6 @@ fn create_widgets(notebook: &Notebook) -> TemplateWidgets {
         color_button,
         theme_entry,
         unique_check,
-        auto_start_check,
         keep_open_check,
         docker_mode_combo,
         docker_container_entry,
@@ -365,7 +362,6 @@ fn create_general_tab() -> (
     Entry,
     ColorButton,
     Entry,
-    CheckButton,
     CheckButton,
     CheckButton,
 ) {
@@ -464,9 +460,6 @@ fn create_general_tab() -> (
     let unique_check = CheckButton::with_label("Unique (only one instance allowed)");
     check_box.append(&unique_check);
 
-    let auto_start_check = CheckButton::with_label("Auto-start on launch");
-    check_box.append(&auto_start_check);
-
     let keep_open_check = CheckButton::with_label("Keep tab open after exit");
     check_box.append(&keep_open_check);
 
@@ -484,7 +477,6 @@ fn create_general_tab() -> (
         color_button,
         theme_entry,
         unique_check,
-        auto_start_check,
         keep_open_check,
     )
 }
@@ -842,7 +834,6 @@ fn load_template_into_widgets(widgets: &TemplateWidgets, template: &StickyTabCon
         .theme_entry
         .set_text(template.theme.as_deref().unwrap_or(""));
     widgets.unique_check.set_active(template.unique);
-    widgets.auto_start_check.set_active(template.auto_start);
     widgets.keep_open_check.set_active(template.keep_open);
 
     // Docker
@@ -982,7 +973,6 @@ fn save_widgets_to_template(widgets: &TemplateWidgets, template: &mut StickyTabC
     let theme = widgets.theme_entry.text().to_string();
     template.theme = if theme.is_empty() { None } else { Some(theme) };
     template.unique = widgets.unique_check.is_active();
-    template.auto_start = widgets.auto_start_check.is_active();
     template.keep_open = widgets.keep_open_check.is_active();
 
     // Docker

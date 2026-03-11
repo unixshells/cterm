@@ -19,8 +19,6 @@ use cterm_app::config::Config;
 use cterm_app::shortcuts::ShortcutManager;
 use cterm_ui::theme::Theme;
 
-use cterm_core::Terminal;
-
 use crate::quick_open::{OpenTabEntry, QuickOpenOverlay, QUICK_OPEN_HEIGHT};
 use crate::terminal_view::TerminalView;
 
@@ -336,45 +334,73 @@ impl CtermWindow {
         cwd: Option<String>,
     ) -> Retained<Self> {
         let this = Self::init_window(mtm, config, theme, "Terminal", None);
-        let terminal = TerminalView::new_with_cwd(mtm, config, theme, cwd);
-        this.attach_terminal_view(terminal);
+        this.spawn_initial_daemon_session(cwd);
         this
     }
 
-    /// Create a window from a restored Terminal (for seamless upgrades)
-    #[cfg(unix)]
-    pub fn from_restored(
-        mtm: MainThreadMarker,
-        config: &Config,
-        theme: &Theme,
-        terminal: Terminal,
-        tab_color: Option<String>,
-    ) -> Retained<Self> {
-        let title = {
-            let term = terminal.screen();
-            if term.title.is_empty() {
-                "cterm".to_string()
-            } else {
-                term.title.clone()
-            }
+    /// Spawn a daemon session in the background and attach the terminal when ready.
+    /// Used for initial window creation where the window must exist immediately.
+    fn spawn_initial_daemon_session(&self, cwd: Option<String>) {
+        let config = self.ivars().config.clone();
+        let opts = cterm_client::CreateSessionOpts {
+            cols: 80,
+            rows: 24,
+            shell: config.general.default_shell.clone(),
+            args: config.general.shell_args.clone(),
+            cwd,
+            ..Default::default()
         };
-        let this = Self::init_window(mtm, config, theme, &title, tab_color);
-        let terminal_view = TerminalView::from_restored(mtm, config, theme, terminal);
-        this.attach_terminal_view(terminal_view);
-        this
+        self.spawn_initial_daemon_session_with_opts(opts);
     }
 
-    /// Create a window from a recovered FD (for crash recovery)
-    #[cfg(unix)]
-    pub fn from_recovered_fd(
+    /// Spawn a daemon session with custom options in the background and attach when ready.
+    fn spawn_initial_daemon_session_with_opts(&self, opts: cterm_client::CreateSessionOpts) {
+        let config = self.ivars().config.clone();
+        let theme = self.ivars().theme.clone();
+        let window_ptr = self as *const Self as usize;
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+
+            let result = match rt {
+                Ok(rt) => rt.block_on(async {
+                    let conn = cterm_client::DaemonConnection::connect_local().await?;
+                    let session = conn.create_session(opts).await?;
+                    Ok::<_, cterm_client::ClientError>(session)
+                }),
+                Err(e) => Err(cterm_client::ClientError::Connection(e.to_string())),
+            };
+
+            match result {
+                Ok(session) => {
+                    dispatch2::Queue::main().exec_async(move || {
+                        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+                        let window: &CtermWindow = unsafe { &*(window_ptr as *const CtermWindow) };
+                        let terminal_view =
+                            TerminalView::from_daemon(mtm, &config, &theme, session);
+                        window.attach_terminal_view(terminal_view);
+                    });
+                }
+                Err(e) => {
+                    log::error!("Failed to create initial daemon session: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Create a window and spawn a daemon session with specific options
+    pub fn new_daemon(
         mtm: MainThreadMarker,
         config: &Config,
         theme: &Theme,
-        recovered: &cterm_app::RecoveredFd,
+        opts: cterm_client::CreateSessionOpts,
+        title: String,
+        color: Option<String>,
     ) -> Retained<Self> {
-        let this = Self::init_window(mtm, config, theme, "Terminal", None);
-        let terminal_view = TerminalView::from_recovered_fd(mtm, config, theme, recovered);
-        this.attach_terminal_view(terminal_view);
+        let this = Self::init_window(mtm, config, theme, &title, color.clone());
+        this.spawn_initial_daemon_session_with_opts(opts);
         this
     }
 
@@ -415,10 +441,8 @@ impl CtermWindow {
         log::info!("Created daemon tab");
     }
 
-    /// Create a new tab (using native macOS window tabbing)
+    /// Create a new tab (daemon-backed via ctermd)
     pub fn create_new_tab(&self) {
-        let mtm = MainThreadMarker::from(self);
-
         // Get the current working directory from the active terminal
         #[cfg(unix)]
         let cwd = self
@@ -430,23 +454,86 @@ impl CtermWindow {
         #[cfg(not(unix))]
         let cwd: Option<String> = None;
 
-        // Create a new window with the same configuration and inherited cwd
-        let new_window =
-            CtermWindow::new_with_cwd(mtm, &self.ivars().config, &self.ivars().theme, cwd);
+        let config = self.ivars().config.clone();
+        let opts = cterm_client::CreateSessionOpts {
+            cols: 80,
+            rows: 24,
+            shell: config.general.default_shell.clone(),
+            args: config.general.shell_args.clone(),
+            cwd,
+            ..Default::default()
+        };
 
-        // Register with AppDelegate for tracking (important for relaunch/upgrade)
-        let app = NSApplication::sharedApplication(mtm);
-        if let Some(delegate) = app.delegate() {
-            let _: () = unsafe { msg_send![&*delegate, registerWindow: &*new_window] };
-        }
+        self.spawn_daemon_tab(opts, None, None);
+    }
 
-        // Add the new window as a tab to this window
-        self.addTabbedWindow_ordered(&new_window, objc2_app_kit::NSWindowOrderingMode::Above);
+    /// Spawn a daemon session in a background thread and create a tab when ready
+    pub fn spawn_daemon_tab(
+        &self,
+        opts: cterm_client::CreateSessionOpts,
+        title_override: Option<String>,
+        color: Option<String>,
+    ) {
+        let config = self.ivars().config.clone();
+        let theme = self.ivars().theme.clone();
+        // SAFETY: self is MainThreadOnly, we use the raw pointer only inside
+        // dispatch2::Queue::main().exec_async() which runs on the main thread
+        let window_ptr = self as *const Self as usize;
 
-        // Make the new tab's window key
-        new_window.makeKeyAndOrderFront(None);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
 
-        log::info!("Created new tab");
+            let result = match rt {
+                Ok(rt) => rt.block_on(async {
+                    let conn = cterm_client::DaemonConnection::connect_local().await?;
+                    let session = conn.create_session(opts).await?;
+                    Ok::<_, cterm_client::ClientError>(session)
+                }),
+                Err(e) => Err(cterm_client::ClientError::Connection(e.to_string())),
+            };
+
+            match result {
+                Ok(session) => {
+                    dispatch2::Queue::main().exec_async(move || {
+                        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+                        let window: &CtermWindow = unsafe { &*(window_ptr as *const CtermWindow) };
+
+                        let title = title_override.unwrap_or_else(|| {
+                            format!(
+                                "Session: {}",
+                                &session.session_id()[..8.min(session.session_id().len())]
+                            )
+                        });
+
+                        let new_window = CtermWindow::from_daemon(mtm, &config, &theme, session);
+                        new_window.setTitle(&NSString::from_str(&title));
+
+                        let app = NSApplication::sharedApplication(mtm);
+                        if let Some(delegate) = app.delegate() {
+                            let _: () =
+                                unsafe { msg_send![&*delegate, registerWindow: &*new_window] };
+                        }
+
+                        window.addTabbedWindow_ordered(
+                            &new_window,
+                            objc2_app_kit::NSWindowOrderingMode::Above,
+                        );
+                        new_window.makeKeyAndOrderFront(None);
+
+                        if let Some(ref c) = color {
+                            new_window.set_tab_color(Some(c));
+                        }
+
+                        log::info!("Created daemon tab: {}", title);
+                    });
+                }
+                Err(e) => {
+                    log::error!("Failed to create daemon session: {}", e);
+                }
+            }
+        });
     }
 
     /// Close current tab
@@ -591,43 +678,8 @@ impl CtermWindow {
         entries
     }
 
-    /// Open a new tab from a template (helper for Quick Open)
+    /// Open a new tab from a template (daemon-backed via ctermd)
     fn open_template_tab(&self, template: &cterm_app::config::StickyTabConfig) {
-        let mtm = MainThreadMarker::from(self);
-
-        // Create a new window from the template
-        let new_window =
-            CtermWindow::from_template(mtm, &self.ivars().config, &self.ivars().theme, template);
-
-        // Register with AppDelegate for tracking
-        let app = NSApplication::sharedApplication(mtm);
-        if let Some(delegate) = app.delegate() {
-            let _: () = unsafe { msg_send![&*delegate, registerWindow: &*new_window] };
-        }
-
-        // Add as a tab to this window
-        self.addTabbedWindow_ordered(&new_window, objc2_app_kit::NSWindowOrderingMode::Above);
-
-        // Make the new tab key
-        new_window.makeKeyAndOrderFront(None);
-
-        // Apply tab color after window is visible
-        if let Some(ref color) = template.color {
-            new_window.set_tab_color(Some(color));
-        }
-
-        log::info!("Opened template tab from Quick Open: {}", template.name);
-    }
-
-    /// Create a window from a tab template
-    pub fn from_template(
-        mtm: MainThreadMarker,
-        config: &Config,
-        theme: &Theme,
-        template: &cterm_app::config::StickyTabConfig,
-    ) -> Retained<Self> {
-        let this = Self::init_window(mtm, config, theme, &template.name, template.color.clone());
-
         // Prepare working directory (clone from git if needed)
         if let Some(ref working_dir) = template.working_directory {
             if let Err(e) =
@@ -637,9 +689,32 @@ impl CtermWindow {
             }
         }
 
-        let terminal_view = TerminalView::from_template(mtm, config, theme, template);
-        this.attach_terminal_view(terminal_view);
-        this
+        let config = &self.ivars().config;
+        let opts = cterm_client::CreateSessionOpts {
+            cols: 80,
+            rows: 24,
+            shell: template
+                .command
+                .clone()
+                .or_else(|| config.general.default_shell.clone()),
+            args: if template.args.is_empty() && template.command.is_none() {
+                config.general.shell_args.clone()
+            } else {
+                template.args.clone()
+            },
+            cwd: template
+                .working_directory
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            env: template
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            ..Default::default()
+        };
+
+        self.spawn_daemon_tab(opts, Some(template.name.clone()), template.color.clone());
     }
 
     /// Get the current tab color

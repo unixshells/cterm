@@ -507,9 +507,6 @@ pub struct StickyTabConfig {
     pub theme: Option<String>,
     /// Locked background color (hex) - overrides theme background
     pub background_color: Option<String>,
-    /// Whether to auto-start this tab on launch
-    #[serde(default)]
-    pub auto_start: bool,
     /// Keep tab open after process exits
     #[serde(default)]
     pub keep_open: bool,
@@ -536,7 +533,6 @@ impl Default for StickyTabConfig {
             color: None,
             theme: None,
             background_color: None,
-            auto_start: false,
             keep_open: false,
             unique: false,
             env: HashMap::new(),
@@ -554,7 +550,6 @@ impl StickyTabConfig {
             command: Some("claude".into()),
             args: Vec::new(),
             color: Some("#7c3aed".into()),
-            auto_start: false,
             keep_open: true,
             unique: true, // Claude tabs are unique by default
             ..Default::default()
@@ -568,7 +563,6 @@ impl StickyTabConfig {
             command: Some("claude".into()),
             args: vec!["-c".into()],
             color: Some("#7c3aed".into()),
-            auto_start: false,
             keep_open: true,
             unique: true, // Claude tabs are unique by default
             ..Default::default()

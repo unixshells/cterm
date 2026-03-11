@@ -34,7 +34,6 @@ const IDC_TMPL_GIT_REMOTE: i32 = 1029;
 const IDC_TMPL_COLOR: i32 = 1024;
 const IDC_TMPL_COLOR_BTN: i32 = 1025;
 const IDC_TMPL_UNIQUE: i32 = 1026;
-const IDC_TMPL_AUTOSTART: i32 = 1027;
 const IDC_TMPL_KEEPOPEN: i32 = 1028;
 
 // Control IDs - Docker tab
@@ -511,17 +510,6 @@ unsafe fn create_general_controls(hwnd: HWND, x: i32, y: i32, w: i32, _h: i32) {
     cy += row_height;
     controls.push(create_checkbox(
         hwnd,
-        IDC_TMPL_AUTOSTART,
-        "Auto-start on launch",
-        x,
-        cy,
-        200,
-        20,
-    ));
-
-    cy += row_height;
-    controls.push(create_checkbox(
-        hwnd,
         IDC_TMPL_KEEPOPEN,
         "Keep open after exit",
         x,
@@ -862,9 +850,6 @@ fn load_current_template() {
                 set_checkbox_state(checkbox, template.unique);
             }
             if let Some(&checkbox) = state.general_controls.get(14) {
-                set_checkbox_state(checkbox, template.auto_start);
-            }
-            if let Some(&checkbox) = state.general_controls.get(15) {
                 set_checkbox_state(checkbox, template.keep_open);
             }
 
@@ -1009,9 +994,6 @@ fn save_current_template() {
                 template.unique = get_checkbox_state(checkbox);
             }
             if let Some(&checkbox) = state.general_controls.get(14) {
-                template.auto_start = get_checkbox_state(checkbox);
-            }
-            if let Some(&checkbox) = state.general_controls.get(15) {
                 template.keep_open = get_checkbox_state(checkbox);
             }
 

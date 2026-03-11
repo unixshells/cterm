@@ -6,9 +6,6 @@
 
 use cterm_app::config::{load_config, Config};
 use cterm_app::upgrade::{receive_upgrade, TabUpgradeState, UpgradeState, WindowUpgradeState};
-use cterm_core::pty::Pty;
-use cterm_core::screen::{Screen, ScreenConfig};
-use cterm_core::term::Terminal;
 use cterm_ui::theme::Theme;
 use gtk4::gdk;
 use gtk4::gio;
@@ -598,79 +595,44 @@ where
 
 /// Create a restored terminal tab (Unix)
 #[cfg(unix)]
-/// Reconstruct a Screen from saved terminal state
-fn reconstruct_screen(config: &Config, tab_state: &TabUpgradeState) -> Screen {
-    let term_state = &tab_state.terminal;
-    let screen_config = ScreenConfig {
-        scrollback_lines: config.general.scrollback_lines,
-    };
-
-    Screen::from_upgrade_state(
-        term_state.grid.clone(),
-        term_state.scrollback.clone(),
-        term_state.alternate_grid.clone(),
-        term_state.cursor.clone(),
-        term_state.saved_cursor.clone(),
-        term_state.alt_saved_cursor.clone(),
-        term_state.scroll_region,
-        term_state.style.clone(),
-        term_state.modes.clone(),
-        term_state.title.clone(),
-        term_state.scroll_offset,
-        term_state.tab_stops.clone(),
-        screen_config,
-    )
-}
-
 fn create_restored_tab_unix(
-    config: &Config,
-    theme: &Theme,
+    _config: &Config,
+    _theme: &Theme,
     tab_state: TabUpgradeState,
-    fds: &[RawFd],
+    _fds: &[RawFd],
 ) -> Result<(u64, String, TerminalWidget), Box<dyn std::error::Error>> {
-    if tab_state.pty_fd_index >= fds.len() {
-        return Err(format!(
-            "PTY FD index {} out of range (max {})",
-            tab_state.pty_fd_index,
-            fds.len()
-        )
-        .into());
-    }
-
-    let pty_fd = fds[tab_state.pty_fd_index];
-    let pty = unsafe { Pty::from_raw_fd(pty_fd, tab_state.child_pid) };
-    let screen = reconstruct_screen(config, &tab_state);
-    let terminal = Terminal::from_restored(screen, pty);
-    let terminal_widget = TerminalWidget::from_restored(terminal, config, theme);
-
-    Ok((tab_state.id, tab_state.title, terminal_widget))
+    // TODO: Reconnect restored sessions via daemon instead of using direct PTY.
+    // Previously this used Pty::from_raw_fd + Terminal::from_restored +
+    // TerminalWidget::from_restored to reconstruct a direct-PTY terminal.
+    // Now all sessions should go through ctermd. The upgrade receiver needs to
+    // hand off the PTY FDs to the daemon and obtain a SessionHandle, then call
+    // TerminalWidget::from_daemon().
+    Err(format!(
+        "Upgrade restore not yet implemented for daemon mode (tab id={})",
+        tab_state.id
+    )
+    .into())
 }
 
 /// Create a restored terminal tab (Windows)
 #[cfg(windows)]
 fn create_restored_tab_windows(
-    config: &Config,
-    theme: &Theme,
+    _config: &Config,
+    _theme: &Theme,
     tab_state: TabUpgradeState,
-    handles: &[(RawHandle, RawHandle, RawHandle, RawHandle, u32)],
+    _handles: &[(RawHandle, RawHandle, RawHandle, RawHandle, u32)],
 ) -> Result<(u64, String, TerminalWidget), Box<dyn std::error::Error>> {
-    if tab_state.pty_fd_index >= handles.len() {
-        return Err(format!(
-            "PTY handle index {} out of range (max {})",
-            tab_state.pty_fd_index,
-            handles.len()
-        )
-        .into());
-    }
-
-    let (hpc, read_pipe, write_pipe, process_handle, process_id) = handles[tab_state.pty_fd_index];
-    let pty =
-        unsafe { Pty::from_raw_handles(hpc, read_pipe, write_pipe, process_handle, process_id) };
-    let screen = reconstruct_screen(config, &tab_state);
-    let terminal = Terminal::from_restored(screen, pty);
-    let terminal_widget = TerminalWidget::from_restored(terminal, config, theme);
-
-    Ok((tab_state.id, tab_state.title, terminal_widget))
+    // TODO: Reconnect restored sessions via daemon instead of using direct PTY.
+    // Previously this used Pty::from_raw_handles + Terminal::from_restored +
+    // TerminalWidget::from_restored to reconstruct a direct-PTY terminal.
+    // Now all sessions should go through ctermd. The upgrade receiver needs to
+    // hand off the PTY handles to the daemon and obtain a SessionHandle, then call
+    // TerminalWidget::from_daemon().
+    Err(format!(
+        "Upgrade restore not yet implemented for daemon mode (tab id={})",
+        tab_state.id
+    )
+    .into())
 }
 
 /// Close a tab by its ID
