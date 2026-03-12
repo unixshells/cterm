@@ -128,8 +128,14 @@ define_class!(
                                     let conn = cterm_client::DaemonConnection::connect_local().await?;
                                     conn.attach_session(session_id, 80, 24).await
                                 }) {
-                                    Ok((handle, _snapshot)) => {
-                                        let window = CtermWindow::from_daemon(mtm, &config, &theme, handle);
+                                    Ok((handle, screen)) => {
+                                        let recon = cterm_app::daemon_reconnect::ReconnectedSession {
+                                            handle,
+                                            title: tab_state.title.clone(),
+                                            custom_title: tab_state.custom_title.clone().unwrap_or_default(),
+                                            screen,
+                                        };
+                                        let window = CtermWindow::from_daemon_with_screen(mtm, &config, &theme, recon);
                                         self.ivars().windows.borrow_mut().push(window.clone());
                                         window.makeKeyAndOrderFront(None);
                                     }

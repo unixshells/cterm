@@ -115,7 +115,7 @@ fn reconstruct_windows(app: &gtk4::Application, state: UpgradeState) {
                     reconnected_sessions.push(cterm_app::daemon_reconnect::ReconnectedSession {
                         handle,
                         title: tab_state.title.clone(),
-                        custom_title: String::new(),
+                        custom_title: tab_state.custom_title.clone().unwrap_or_default(),
                         screen,
                     });
                 }
