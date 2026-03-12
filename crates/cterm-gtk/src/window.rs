@@ -51,6 +51,7 @@ pub struct CtermWindow {
     notification_bar: NotificationBar,
     file_manager: Rc<RefCell<PendingFileManager>>,
     quick_open: QuickOpenOverlay,
+    remote_manager: cterm_client::RemoteManager,
 }
 
 /// Show an error dialog when a seamless upgrade fails.
@@ -137,6 +138,7 @@ impl CtermWindow {
             notification_bar,
             file_manager,
             quick_open,
+            remote_manager: cterm_client::RemoteManager::new(),
         };
 
         // Set up window actions
@@ -238,6 +240,7 @@ impl CtermWindow {
             notification_bar,
             file_manager,
             quick_open,
+            remote_manager: cterm_client::RemoteManager::new(),
         };
 
         cterm_window.setup_actions();
@@ -535,6 +538,18 @@ impl CtermWindow {
                     finalize_new_tab(
                         &notebook, &tabs, &tab_bar, tab_id, page_num, title, terminal, false, sid,
                     );
+                });
+            });
+            window.add_action(&action);
+        }
+
+        // Manage Remotes
+        {
+            let window_clone = window.clone();
+            let action = gio::SimpleAction::new("manage-remotes", None);
+            action.connect_activate(move |_, _| {
+                crate::remotes_dialog::show_remotes_dialog(&window_clone, || {
+                    log::info!("Remotes configuration saved");
                 });
             });
             window.add_action(&action);
@@ -1040,6 +1055,7 @@ impl CtermWindow {
             let has_bell = Rc::clone(&has_bell);
             let file_manager = Rc::clone(&self.file_manager);
             let notification_bar = self.notification_bar.clone();
+            let remote_manager = self.remote_manager.clone();
             let action = gio::SimpleAction::new("tab-templates", None);
             action.connect_activate(move |_, _| {
                 let notebook = notebook.clone();
@@ -1052,6 +1068,7 @@ impl CtermWindow {
                 let has_bell = Rc::clone(&has_bell);
                 let file_manager = Rc::clone(&file_manager);
                 let notification_bar = notification_bar.clone();
+                let remote_manager = remote_manager.clone();
                 crate::tab_templates_dialog::show_tab_templates_dialog_with_open(
                     &window_clone,
                     || {
@@ -1070,6 +1087,7 @@ impl CtermWindow {
                             &file_manager,
                             &notification_bar,
                             &template,
+                            &remote_manager,
                         );
                     },
                 );
@@ -1664,6 +1682,7 @@ impl CtermWindow {
         let has_bell = Rc::clone(&self.has_bell);
         let file_manager = Rc::clone(&self.file_manager);
         let notification_bar = self.notification_bar.clone();
+        let remote_manager = self.remote_manager.clone();
 
         self.quick_open.set_on_select(move |template| {
             create_tab_from_template(
@@ -1678,6 +1697,7 @@ impl CtermWindow {
                 &file_manager,
                 &notification_bar,
                 &template,
+                &remote_manager,
             );
             log::info!("Opened template tab from Quick Open: {}", template.name);
         });
@@ -2213,6 +2233,7 @@ fn create_new_tab(
         None,
         None,
         false,
+        None,
     );
 }
 
@@ -2257,6 +2278,7 @@ fn create_docker_tab(
         Some("#0db7ed".to_string()),
         None,
         false,
+        None,
     );
 }
 
@@ -2278,6 +2300,7 @@ fn spawn_daemon_tab(
     color: Option<String>,
     background_color: Option<String>,
     keep_open: bool,
+    remote: Option<(cterm_client::RemoteManager, String, String)>,
 ) {
     let notebook = notebook.clone();
     let tabs = Rc::clone(tabs);
@@ -2299,7 +2322,11 @@ fn spawn_daemon_tab(
 
         let result = match rt {
             Ok(rt) => rt.block_on(async {
-                let conn = cterm_client::DaemonConnection::connect_local().await?;
+                let conn = if let Some((ref mgr, ref name, ref host)) = remote {
+                    mgr.get_or_connect(name, host).await?
+                } else {
+                    cterm_client::DaemonConnection::connect_local().await?
+                };
                 let session = conn.create_session(opts).await?;
                 Ok(session)
             }),
@@ -2508,6 +2535,7 @@ fn create_tab_from_template(
     file_manager: &Rc<RefCell<PendingFileManager>>,
     notification_bar: &NotificationBar,
     template: &cterm_app::config::StickyTabConfig,
+    remote_manager: &cterm_client::RemoteManager,
 ) {
     // Prepare working directory (clone from git if needed)
     if let Some(ref working_dir) = template.working_directory {
@@ -2544,6 +2572,14 @@ fn create_tab_from_template(
             .collect(),
         ..Default::default()
     };
+
+    // Resolve remote from template
+    let remote = template.remote.as_ref().and_then(|remote_name| {
+        cfg.remotes
+            .iter()
+            .find(|r| r.name == *remote_name)
+            .map(|r| (remote_manager.clone(), r.name.clone(), r.host.clone()))
+    });
     drop(cfg);
 
     spawn_daemon_tab(
@@ -2562,6 +2598,7 @@ fn create_tab_from_template(
         template.color.clone(),
         template.background_color.clone(),
         template.keep_open,
+        remote,
     );
 }
 

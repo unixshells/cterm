@@ -18,6 +18,8 @@ pub mod mouse;
 pub mod notification_bar;
 pub mod preferences_dialog;
 pub mod quick_open;
+pub mod remotes_dialog;
+pub mod session_dialog;
 pub mod tab_bar;
 pub mod templates_dialog;
 pub mod terminal_canvas;

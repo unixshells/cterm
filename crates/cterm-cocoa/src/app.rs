@@ -8,6 +8,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -156,6 +157,11 @@ define_class!(
                                             if let Some(tv) = window.active_terminal() {
                                                 tv.set_template_name(Some(tpl_name.clone()));
                                             }
+                                        }
+
+                                        // Restore fullscreen state
+                                        if window_state.fullscreen {
+                                            window.toggleFullScreen(None);
                                         }
 
                                         self.ivars().windows.borrow_mut().push(window.clone());
@@ -1079,6 +1085,7 @@ impl AppDelegate {
             window_state.y = frame.origin.y as i32;
             window_state.width = frame.size.width as i32;
             window_state.height = frame.size.height as i32;
+            window_state.fullscreen = window.styleMask().contains(NSWindowStyleMask::FullScreen);
 
             if let Some(terminal_view) = window.active_terminal() {
                 let mut tab_state = TabUpgradeState::new(0);

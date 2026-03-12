@@ -12,6 +12,8 @@ path = "src/lib.rs"
 cterm-core.workspace = true
 cterm-ui.workspace = true
 cterm-app.workspace = true
+cterm-client.workspace = true
+cterm-proto.workspace = true
 
 # Windows GUI
 native-windows-gui = "1.0"

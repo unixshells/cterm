@@ -65,6 +65,11 @@ pub enum MenuAction {
     TabTemplates = 5003,
     About = 5004,
 
+    // Sessions menu
+    AttachSession = 7001,
+    SSHConnect = 7002,
+    ManageRemotes = 7003,
+
     // Debug menu (shown when Shift is held)
     DebugRelaunch = 6001,
     DebugDumpState = 6002,
@@ -115,6 +120,9 @@ impl MenuAction {
             5002 => Some(Self::CheckUpdates),
             5003 => Some(Self::TabTemplates),
             5004 => Some(Self::About),
+            7001 => Some(Self::AttachSession),
+            7002 => Some(Self::SSHConnect),
+            7003 => Some(Self::ManageRemotes),
             6001 => Some(Self::DebugRelaunch),
             6002 => Some(Self::DebugDumpState),
             6003 => Some(Self::ViewLogs),
@@ -148,6 +156,22 @@ pub fn create_menu_bar(show_debug: bool) -> HMENU {
         append_menu_item(file_menu, MenuAction::CloseOtherTabs, "Close &Other Tabs");
         append_separator(file_menu);
         append_menu_item(file_menu, MenuAction::DockerPicker, "&Docker...");
+
+        // Sessions submenu
+        let sessions_menu = CreatePopupMenu();
+        append_menu_item(
+            sessions_menu,
+            MenuAction::AttachSession,
+            "&Attach to Session...",
+        );
+        append_menu_item(sessions_menu, MenuAction::SSHConnect, "&SSH Remote...");
+        append_menu_item(
+            sessions_menu,
+            MenuAction::ManageRemotes,
+            "&Manage Remotes...",
+        );
+        append_popup_menu(file_menu, sessions_menu, "S&essions");
+
         append_separator(file_menu);
         append_menu_item(file_menu, MenuAction::Quit, "&Quit\tAlt+F4");
         append_popup_menu(menu_bar, file_menu, "&File");

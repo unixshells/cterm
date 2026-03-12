@@ -35,6 +35,7 @@ const IDC_TMPL_COLOR: i32 = 1024;
 const IDC_TMPL_COLOR_BTN: i32 = 1025;
 const IDC_TMPL_UNIQUE: i32 = 1026;
 const IDC_TMPL_KEEPOPEN: i32 = 1028;
+const IDC_TMPL_REMOTE: i32 = 1027;
 
 // Control IDs - Docker tab
 const IDC_DOCKER_MODE: i32 = 1030;
@@ -114,6 +115,8 @@ struct DialogState {
     general_controls: Vec<HWND>,
     docker_controls: Vec<HWND>,
     ssh_controls: Vec<HWND>,
+    /// Remote names loaded from config (for remote combo)
+    remote_names: Vec<String>,
 }
 
 // Thread-local storage for dialog state
@@ -125,8 +128,14 @@ thread_local! {
 ///
 /// Returns true if templates were saved, false if cancelled.
 pub fn show_templates_dialog(parent: HWND) -> bool {
-    // Load current templates
+    // Load current templates and config
     let templates = cterm_app::load_sticky_tabs().unwrap_or_default();
+    let remote_names: Vec<String> = cterm_app::config::load_config()
+        .unwrap_or_default()
+        .remotes
+        .iter()
+        .map(|r| r.name.clone())
+        .collect();
 
     DIALOG_STATE.with(|s| {
         *s.borrow_mut() = Some(DialogState {
@@ -136,6 +145,7 @@ pub fn show_templates_dialog(parent: HWND) -> bool {
             general_controls: Vec::new(),
             docker_controls: Vec::new(),
             ssh_controls: Vec::new(),
+            remote_names,
         });
     });
 
@@ -495,6 +505,29 @@ unsafe fn create_general_controls(hwnd: HWND, x: i32, y: i32, w: i32, _h: i32) {
         22,
     ));
 
+    // Remote
+    cy += row_height + 5;
+    controls.push(create_label(
+        hwnd,
+        -1,
+        "Remote:",
+        x,
+        cy + 3,
+        label_width,
+        18,
+    ));
+    let remote_combo = create_combobox(hwnd, IDC_TMPL_REMOTE, x + label_width + 10, cy, 200, 22);
+    add_combobox_item(remote_combo, "Local");
+    DIALOG_STATE.with(|s| {
+        if let Some(ref state) = *s.borrow() {
+            for name in &state.remote_names {
+                add_combobox_item(remote_combo, name);
+            }
+        }
+    });
+    set_combobox_selection(remote_combo, 0);
+    controls.push(remote_combo);
+
     // Checkboxes
     cy += row_height + 10;
     controls.push(create_checkbox(
@@ -846,10 +879,24 @@ fn load_current_template() {
             if let Some(&edit) = state.general_controls.get(11) {
                 set_edit_text(edit, template.color.as_deref().unwrap_or(""));
             }
-            if let Some(&checkbox) = state.general_controls.get(13) {
+            // Remote combo
+            if let Some(&combo) = state.general_controls.get(14) {
+                let idx = match &template.remote {
+                    Some(remote_name) => state
+                        .remote_names
+                        .iter()
+                        .position(|n| n == remote_name)
+                        .map(|i| (i + 1) as i32)
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                set_combobox_selection(combo, idx);
+            }
+
+            if let Some(&checkbox) = state.general_controls.get(15) {
                 set_checkbox_state(checkbox, template.unique);
             }
-            if let Some(&checkbox) = state.general_controls.get(14) {
+            if let Some(&checkbox) = state.general_controls.get(16) {
                 set_checkbox_state(checkbox, template.keep_open);
             }
 
@@ -990,10 +1037,18 @@ fn save_current_template() {
                 let color = get_edit_text(edit);
                 template.color = if color.is_empty() { None } else { Some(color) };
             }
-            if let Some(&checkbox) = state.general_controls.get(13) {
+            // Remote combo
+            if let Some(&combo) = state.general_controls.get(14) {
+                template.remote = match get_combobox_selection(combo) {
+                    Some(idx) if idx > 0 => state.remote_names.get((idx - 1) as usize).cloned(),
+                    _ => None,
+                };
+            }
+
+            if let Some(&checkbox) = state.general_controls.get(15) {
                 template.unique = get_checkbox_state(checkbox);
             }
-            if let Some(&checkbox) = state.general_controls.get(14) {
+            if let Some(&checkbox) = state.general_controls.get(16) {
                 template.keep_open = get_checkbox_state(checkbox);
             }
 

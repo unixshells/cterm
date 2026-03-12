@@ -39,6 +39,12 @@ pub const WM_APP_PTY_EXIT: u32 = WM_APP + 2;
 pub const WM_APP_TITLE_CHANGED: u32 = WM_APP + 3;
 pub const WM_APP_BELL: u32 = WM_APP + 4;
 
+/// Commands sent to the daemon I/O thread
+pub enum DaemonCmd {
+    Write(Vec<u8>),
+    Resize(u32, u32),
+}
+
 /// Tab entry
 pub struct TabEntry {
     pub id: u64,
@@ -51,6 +57,11 @@ pub struct TabEntry {
     pub title_locked: bool,
     #[allow(dead_code)]
     pub reader_handle: Option<thread::JoinHandle<()>>,
+    /// Session ID for daemon-backed tabs
+    pub session_id: Option<String>,
+    /// Command sender for daemon-backed tabs (write/resize)
+    #[allow(dead_code)]
+    pub daemon_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<DaemonCmd>>,
 }
 
 /// Window state
@@ -72,6 +83,8 @@ pub struct WindowState {
     menu_handle: winapi::shared::windef::HMENU,
     /// Skip close confirmation (set during relaunch)
     pub skip_close_confirm: bool,
+    /// Remote host connection manager
+    pub remote_manager: cterm_client::RemoteManager,
 }
 
 impl WindowState {
@@ -106,6 +119,7 @@ impl WindowState {
             mouse_state: MouseState::new(),
             menu_handle,
             skip_close_confirm: false,
+            remote_manager: cterm_client::RemoteManager::new(),
         }
     }
 
@@ -179,6 +193,8 @@ impl WindowState {
             has_bell: false,
             title_locked: false,
             reader_handle: Some(reader_handle),
+            session_id: None,
+            daemon_cmd_tx: None,
         };
 
         self.tabs.push(entry);
@@ -196,6 +212,48 @@ impl WindowState {
         &mut self,
         template: &cterm_app::config::StickyTabConfig,
     ) -> Result<u64, Box<dyn std::error::Error>> {
+        // If the template specifies a remote, use daemon-backed tab
+        if let Some(ref remote_name) = template.remote {
+            let remote = self
+                .config
+                .remotes
+                .iter()
+                .find(|r| r.name == *remote_name)
+                .map(|r| (self.remote_manager.clone(), r.name.clone(), r.host.clone()));
+            if remote.is_none() {
+                log::error!(
+                    "Remote '{}' not found in config, creating locally",
+                    remote_name
+                );
+            }
+            let (cols, rows) = self.terminal_size();
+            let opts = cterm_client::CreateSessionOpts {
+                cols: cols as u32,
+                rows: rows as u32,
+                shell: template.command.clone(),
+                args: template.args.clone(),
+                cwd: template
+                    .working_directory
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                env: template
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                ..Default::default()
+            };
+            let tab_id = self.spawn_daemon_tab(
+                opts,
+                template.name.clone(),
+                template.color.clone(),
+                template.background_color.clone(),
+                template.keep_open,
+                remote,
+            );
+            return Ok(tab_id);
+        }
+
         let tab_id = self.next_tab_id.fetch_add(1, Ordering::SeqCst);
 
         // Get terminal size
@@ -285,6 +343,8 @@ impl WindowState {
             has_bell: false,
             title_locked: true, // Lock title for template tabs
             reader_handle: Some(reader_handle),
+            session_id: None,
+            daemon_cmd_tx: None,
         };
 
         self.tabs.push(entry);
@@ -389,6 +449,8 @@ impl WindowState {
             has_bell: false,
             title_locked: true, // Lock title for docker tabs
             reader_handle: Some(reader_handle),
+            session_id: None,
+            daemon_cmd_tx: None,
         };
 
         self.tabs.push(entry);
@@ -400,6 +462,161 @@ impl WindowState {
         self.invalidate();
 
         Ok(tab_id)
+    }
+
+    /// Create a new daemon-backed tab
+    ///
+    /// Connects to ctermd (local or remote), creates a session, and streams
+    /// output. The tab is created immediately; the connection happens in
+    /// a background thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_daemon_tab(
+        &mut self,
+        opts: cterm_client::CreateSessionOpts,
+        title: String,
+        color: Option<String>,
+        background_color: Option<String>,
+        _keep_open: bool,
+        remote: Option<(cterm_client::RemoteManager, String, String)>,
+    ) -> u64 {
+        let tab_id = self.next_tab_id.fetch_add(1, Ordering::SeqCst);
+        let (cols, rows) = self.terminal_size();
+
+        let screen_config = ScreenConfig {
+            scrollback_lines: self.config.general.scrollback_lines,
+        };
+        let mut terminal = Terminal::new(cols, rows, screen_config);
+
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCmd>();
+        let write_tx = cmd_tx.clone();
+        terminal.set_write_fn(Box::new(move |data: &[u8]| {
+            let _ = write_tx.send(DaemonCmd::Write(data.to_vec()));
+            Ok(())
+        }));
+
+        let terminal = Arc::new(Mutex::new(terminal));
+
+        let entry = TabEntry {
+            id: tab_id,
+            title: title.clone(),
+            terminal: Arc::clone(&terminal),
+            color: color.clone(),
+            background_color: background_color.clone(),
+            has_bell: false,
+            title_locked: true,
+            reader_handle: None,
+            session_id: None,
+            daemon_cmd_tx: Some(cmd_tx),
+        };
+
+        self.tabs.push(entry);
+        self.active_tab_index = self.tabs.len() - 1;
+        self.tab_bar.add_tab(tab_id, &title);
+        self.tab_bar.set_active(tab_id);
+
+        if let Some(ref color_hex) = color {
+            let rgb = parse_hex_color(color_hex);
+            self.tab_bar.set_color(tab_id, rgb);
+        }
+
+        if let Some(ref bg) = background_color {
+            if let Some(ref mut renderer) = self.renderer {
+                renderer.set_background_override(Some(bg));
+            }
+        }
+
+        let hwnd = self.hwnd.0 as usize;
+        let reader_handle =
+            start_daemon_create_thread(hwnd, tab_id, terminal, opts, remote, cmd_rx);
+
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.reader_handle = Some(reader_handle);
+        }
+
+        self.invalidate();
+        tab_id
+    }
+
+    /// Attach to an existing daemon session and create a tab for it.
+    ///
+    /// Used for reconnecting after upgrades and for the "Attach to Session" menu.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_session_tab(
+        &mut self,
+        session_id: &str,
+        title: String,
+        custom_title: Option<String>,
+        color: Option<String>,
+        screen_snapshot: Option<cterm_proto::proto::GetScreenResponse>,
+    ) -> u64 {
+        let tab_id = self.next_tab_id.fetch_add(1, Ordering::SeqCst);
+        let (cols, rows) = self.terminal_size();
+
+        let screen_config = ScreenConfig {
+            scrollback_lines: self.config.general.scrollback_lines,
+        };
+        let mut terminal = Terminal::new(cols, rows, screen_config);
+
+        // Apply screen snapshot if available
+        if let Some(ref screen_data) = screen_snapshot {
+            cterm_app::daemon_session::apply_screen_snapshot(&mut terminal, screen_data);
+        }
+
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCmd>();
+        let write_tx = cmd_tx.clone();
+        terminal.set_write_fn(Box::new(move |data: &[u8]| {
+            let _ = write_tx.send(DaemonCmd::Write(data.to_vec()));
+            Ok(())
+        }));
+
+        let terminal = Arc::new(Mutex::new(terminal));
+
+        let (display_title, title_locked) = match custom_title {
+            Some(ref ct) if !ct.is_empty() => (ct.clone(), true),
+            _ => (title, false),
+        };
+
+        let entry = TabEntry {
+            id: tab_id,
+            title: display_title.clone(),
+            terminal: Arc::clone(&terminal),
+            color: color.clone(),
+            background_color: None,
+            has_bell: false,
+            title_locked,
+            reader_handle: None,
+            session_id: Some(session_id.to_string()),
+            daemon_cmd_tx: Some(cmd_tx),
+        };
+
+        self.tabs.push(entry);
+        self.active_tab_index = self.tabs.len() - 1;
+        self.tab_bar.add_tab(tab_id, &display_title);
+        self.tab_bar.set_active(tab_id);
+
+        if let Some(ref color_hex) = color {
+            let rgb = parse_hex_color(color_hex);
+            self.tab_bar.set_color(tab_id, rgb);
+        }
+
+        let hwnd = self.hwnd.0 as usize;
+        let sid = session_id.to_string();
+        let reader_handle = start_daemon_attach_thread(
+            hwnd,
+            tab_id,
+            terminal,
+            sid,
+            cols as u32,
+            rows as u32,
+            cmd_rx,
+        );
+
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.reader_handle = Some(reader_handle);
+        }
+
+        self.invalidate();
+        tab_id
     }
 
     /// Start the PTY reader thread
@@ -663,6 +880,10 @@ impl WindowState {
         for tab in &self.tabs {
             let mut term = tab.terminal.lock().unwrap();
             term.resize(cols, rows);
+            // Forward resize to daemon if this is a daemon-backed tab
+            if let Some(ref tx) = tab.daemon_cmd_tx {
+                let _ = tx.send(DaemonCmd::Resize(cols as u32, rows as u32));
+            }
         }
     }
 
@@ -972,6 +1193,38 @@ impl WindowState {
                 MenuAction::ViewLogs => {
                     // Show the in-app log viewer
                     crate::log_viewer::show_log_viewer(self.hwnd.0 as *mut _);
+                }
+                MenuAction::AttachSession => {
+                    if let Some(session_id) =
+                        crate::session_dialog::show_session_picker(self.hwnd.0 as *mut _)
+                    {
+                        log::info!("Attaching to session: {}", session_id);
+                        self.attach_session_tab(
+                            &session_id,
+                            "Terminal".to_string(),
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                }
+                MenuAction::SSHConnect => {
+                    if let Some(host) =
+                        crate::session_dialog::show_ssh_dialog(self.hwnd.0 as *mut _)
+                    {
+                        log::info!("SSH connecting to: {}", host);
+                        let (cols, rows) = self.terminal_size();
+                        let opts = cterm_client::CreateSessionOpts {
+                            cols: cols as u32,
+                            rows: rows as u32,
+                            ..Default::default()
+                        };
+                        let remote = Some((self.remote_manager.clone(), host.clone(), host));
+                        self.spawn_daemon_tab(opts, "SSH".to_string(), None, None, false, remote);
+                    }
+                }
+                MenuAction::ManageRemotes => {
+                    crate::remotes_dialog::show_remotes_dialog(self.hwnd.0 as *mut _);
                 }
             }
         }
@@ -1536,6 +1789,328 @@ pub fn create_window(config: &Config, theme: &Theme) -> windows::core::Result<HW
     }
 
     Ok(hwnd)
+}
+
+/// Create a window and restore tabs from upgrade state
+///
+/// Reconnects to daemon sessions and restores window geometry, tab colors,
+/// and custom titles from the upgrade state.
+pub fn create_window_from_upgrade(
+    config: &Config,
+    theme: &Theme,
+    window_state: &cterm_app::upgrade::WindowUpgradeState,
+) -> windows::core::Result<HWND> {
+    let class_name: Vec<u16> = WINDOW_CLASS
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let title: Vec<u16> = "cterm".encode_utf16().chain(std::iter::once(0)).collect();
+
+    // Use saved window geometry or defaults
+    let dpi = dpi::get_system_dpi();
+    let width = if window_state.width > 0 {
+        window_state.width
+    } else {
+        dpi::scale_by_dpi(800, dpi)
+    };
+    let height = if window_state.height > 0 {
+        window_state.height
+    } else {
+        dpi::scale_by_dpi(600, dpi)
+    };
+    let x = if window_state.x != 0 || window_state.y != 0 {
+        window_state.x
+    } else {
+        CW_USEDEFAULT
+    };
+    let y = if window_state.x != 0 || window_state.y != 0 {
+        window_state.y
+    } else {
+        CW_USEDEFAULT
+    };
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            x,
+            y,
+            width,
+            height,
+            None,
+            None,
+            None,
+            None,
+        )?
+    };
+
+    let mut state = Box::new(WindowState::new(hwnd, config, theme));
+    state.init_renderer()?;
+
+    // Reconnect to daemon sessions
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            log::error!("Failed to create tokio runtime: {}", e);
+            windows::core::Error::from_win32()
+        })?;
+
+    let mut any_restored = false;
+    for tab_state in &window_state.tabs {
+        let Some(ref session_id) = tab_state.session_id else {
+            log::warn!("Tab '{}' has no session_id, skipping", tab_state.title);
+            continue;
+        };
+
+        match rt.block_on(async {
+            let conn = cterm_client::DaemonConnection::connect_local().await?;
+            conn.attach_session(session_id, 80, 24).await
+        }) {
+            Ok((_handle, screen)) => {
+                log::info!("Reconnected to session {}", session_id);
+                state.attach_session_tab(
+                    session_id,
+                    tab_state.title.clone(),
+                    tab_state.custom_title.clone(),
+                    tab_state.color.clone(),
+                    screen,
+                );
+                any_restored = true;
+            }
+            Err(e) => {
+                log::error!("Failed to reconnect session {}: {}", session_id, e);
+            }
+        }
+    }
+
+    // If no sessions were restored, create a fresh tab
+    if !any_restored {
+        state.new_tab().map_err(|e| {
+            log::error!("Failed to create initial tab: {}", e);
+            windows::core::Error::from_win32()
+        })?;
+    }
+
+    // Restore active tab
+    if window_state.active_tab > 0 && window_state.active_tab < state.tabs.len() {
+        state.switch_to_tab(window_state.active_tab);
+    }
+
+    // Store state pointer in window
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+    }
+
+    // Restore fullscreen/maximized state
+    if window_state.fullscreen {
+        // Toggle fullscreen via the window state method
+        let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+        if !state_ptr.is_null() {
+            let state = unsafe { &mut *state_ptr };
+            state.toggle_fullscreen();
+        }
+    } else if window_state.maximized {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+        }
+    }
+
+    Ok(hwnd)
+}
+
+/// Start a background thread that connects to daemon, creates a session, and streams output.
+fn start_daemon_create_thread(
+    hwnd: usize,
+    tab_id: u64,
+    terminal: Arc<Mutex<Terminal>>,
+    opts: cterm_client::CreateSessionOpts,
+    remote: Option<(cterm_client::RemoteManager, String, String)>,
+    cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCmd>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("Failed to create tokio runtime: {}", e);
+                post_tab_exit(hwnd, tab_id);
+                return;
+            }
+        };
+
+        rt.block_on(async move {
+            let conn = if let Some((ref mgr, ref name, ref host)) = remote {
+                match mgr.get_or_connect(name, host).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("Failed to connect to remote: {}", e);
+                        post_tab_exit(hwnd, tab_id);
+                        return;
+                    }
+                }
+            } else {
+                match cterm_client::DaemonConnection::connect_local().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("Failed to connect to local daemon: {}", e);
+                        post_tab_exit(hwnd, tab_id);
+                        return;
+                    }
+                }
+            };
+
+            let session = match conn.create_session(opts).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to create daemon session: {}", e);
+                    post_tab_exit(hwnd, tab_id);
+                    return;
+                }
+            };
+
+            run_daemon_io_loop(hwnd, tab_id, terminal, session, cmd_rx).await;
+        });
+    })
+}
+
+/// Start a background thread that connects to daemon, attaches to a session, and streams output.
+fn start_daemon_attach_thread(
+    hwnd: usize,
+    tab_id: u64,
+    terminal: Arc<Mutex<Terminal>>,
+    session_id: String,
+    cols: u32,
+    rows: u32,
+    cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCmd>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("Failed to create tokio runtime: {}", e);
+                post_tab_exit(hwnd, tab_id);
+                return;
+            }
+        };
+
+        rt.block_on(async move {
+            let conn = match cterm_client::DaemonConnection::connect_local().await {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Failed to connect to daemon: {}", e);
+                    post_tab_exit(hwnd, tab_id);
+                    return;
+                }
+            };
+
+            let (session, _snapshot) = match conn.attach_session(&session_id, cols, rows).await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Failed to attach to session {}: {}", session_id, e);
+                    post_tab_exit(hwnd, tab_id);
+                    return;
+                }
+            };
+
+            run_daemon_io_loop(hwnd, tab_id, terminal, session, cmd_rx).await;
+        });
+    })
+}
+
+/// Run the daemon I/O loop: handles write/resize commands and streams output.
+async fn run_daemon_io_loop(
+    hwnd: usize,
+    tab_id: u64,
+    terminal: Arc<Mutex<Terminal>>,
+    session: cterm_client::SessionHandle,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCmd>,
+) {
+    // Spawn command handler for write/resize
+    let cmd_session = session.clone();
+    tokio::spawn(async move {
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                DaemonCmd::Write(data) => {
+                    if let Err(e) = cmd_session.write_input(&data).await {
+                        log::error!("Failed to write to daemon: {}", e);
+                        break;
+                    }
+                }
+                DaemonCmd::Resize(c, r) => {
+                    if let Err(e) = cmd_session.resize(c, r).await {
+                        log::error!("Failed to resize daemon session: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    // Stream output
+    match session.stream_output().await {
+        Ok(mut stream) => {
+            use futures::StreamExt;
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(chunk) => {
+                        {
+                            let mut term = terminal.lock().unwrap();
+                            let events = term.process(&chunk.data);
+                            for event in events {
+                                match event {
+                                    TerminalEvent::TitleChanged(_) => {
+                                        post_message(hwnd, WM_APP_TITLE_CHANGED, tab_id);
+                                    }
+                                    TerminalEvent::Bell => {
+                                        post_message(hwnd, WM_APP_BELL, tab_id);
+                                    }
+                                    TerminalEvent::ProcessExited(_) => {
+                                        post_tab_exit(hwnd, tab_id);
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        post_message(hwnd, WM_APP_PTY_DATA, tab_id);
+                    }
+                    Err(e) => {
+                        log::error!("Daemon output stream error: {}", e);
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to start daemon output stream: {}", e);
+        }
+    }
+
+    post_tab_exit(hwnd, tab_id);
+}
+
+/// Post a WM_APP message to the window
+fn post_message(hwnd: usize, msg: u32, tab_id: u64) {
+    unsafe {
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut _)),
+            msg,
+            WPARAM(tab_id as usize),
+            LPARAM(0),
+        );
+    }
+}
+
+/// Post a PTY exit message to close the tab
+fn post_tab_exit(hwnd: usize, tab_id: u64) {
+    post_message(hwnd, WM_APP_PTY_EXIT, tab_id);
 }
 
 /// Window procedure

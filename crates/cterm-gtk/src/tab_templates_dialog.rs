@@ -22,6 +22,8 @@ struct TemplateWidgets {
     // Template selector
     template_combo: ComboBoxText,
     // General tab
+    remote_combo: ComboBoxText,
+    remote_names: Vec<String>,
     name_entry: Entry,
     command_entry: Entry,
     args_entry: Entry,
@@ -269,6 +271,8 @@ fn create_widgets(notebook: &Notebook) -> TemplateWidgets {
     let (
         general_page,
         name_entry,
+        remote_combo,
+        remote_names,
         command_entry,
         args_entry,
         path_entry,
@@ -319,6 +323,8 @@ fn create_widgets(notebook: &Notebook) -> TemplateWidgets {
 
     TemplateWidgets {
         template_combo,
+        remote_combo,
+        remote_names,
         name_entry,
         command_entry,
         args_entry,
@@ -353,9 +359,12 @@ fn create_widgets(notebook: &Notebook) -> TemplateWidgets {
 }
 
 #[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn create_general_tab() -> (
     ScrolledWindow,
     Entry,
+    ComboBoxText,
+    Vec<String>,
     Entry,
     Entry,
     Entry,
@@ -387,6 +396,24 @@ fn create_general_tab() -> (
     let name_entry = Entry::new();
     name_entry.set_hexpand(true);
     grid.attach(&name_entry, 1, row, 1, 1);
+    row += 1;
+
+    // Remote
+    let remote_label = Label::new(Some("Remote:"));
+    remote_label.set_halign(Align::End);
+    grid.attach(&remote_label, 0, row, 1, 1);
+    let remote_combo = ComboBoxText::new();
+    remote_combo.set_hexpand(true);
+    remote_combo.append_text("Local");
+    let mut remote_names = Vec::new();
+    if let Ok(cfg) = cterm_app::config::load_config() {
+        for remote in &cfg.remotes {
+            remote_combo.append_text(&remote.name);
+            remote_names.push(remote.name.clone());
+        }
+    }
+    remote_combo.set_active(Some(0));
+    grid.attach(&remote_combo, 1, row, 1, 1);
     row += 1;
 
     // Command
@@ -470,6 +497,8 @@ fn create_general_tab() -> (
     (
         scroll,
         name_entry,
+        remote_combo,
+        remote_names,
         command_entry,
         args_entry,
         path_entry,
@@ -836,6 +865,20 @@ fn load_template_into_widgets(widgets: &TemplateWidgets, template: &StickyTabCon
     widgets.unique_check.set_active(template.unique);
     widgets.keep_open_check.set_active(template.keep_open);
 
+    // Remote
+    let remote_idx = template
+        .remote
+        .as_ref()
+        .and_then(|name| {
+            widgets
+                .remote_names
+                .iter()
+                .position(|r| r == name)
+                .map(|i| (i + 1) as u32)
+        })
+        .unwrap_or(0);
+    widgets.remote_combo.set_active(Some(remote_idx));
+
     // Docker
     let docker_mode = match &template.docker {
         None => 0,
@@ -974,6 +1017,14 @@ fn save_widgets_to_template(widgets: &TemplateWidgets, template: &mut StickyTabC
     template.theme = if theme.is_empty() { None } else { Some(theme) };
     template.unique = widgets.unique_check.is_active();
     template.keep_open = widgets.keep_open_check.is_active();
+
+    // Remote
+    let remote_idx = widgets.remote_combo.active().unwrap_or(0) as usize;
+    template.remote = if remote_idx == 0 {
+        None
+    } else {
+        widgets.remote_names.get(remote_idx - 1).cloned()
+    };
 
     // Docker
     let docker_mode = widgets.docker_mode_combo.active().unwrap_or(0);

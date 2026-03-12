@@ -12,8 +12,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Run the upgrade receiver
 ///
-/// Reads upgrade state from the given file path, then starts the
-/// normal application which will reconnect to daemon sessions.
+/// Reads upgrade state from the given file path, reconnects to daemon
+/// sessions, and reconstructs the application with restored windows.
 pub fn run_receiver(state_path: &str) -> i32 {
     match receive_and_start(state_path) {
         Ok(()) => 0,
@@ -47,10 +47,6 @@ fn receive_and_start(state_path: &str) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    // Since sessions live in the daemon, they survive the upgrade.
-    // Start the normal application which will detect and reconnect
-    // to daemon sessions on startup.
-
     // Load config and theme
     let config = cterm_app::load_config().unwrap_or_default();
     let theme = cterm_app::resolve_theme(&config);
@@ -60,7 +56,25 @@ fn receive_and_start(state_path: &str) -> Result<(), Box<dyn std::error::Error>>
     crate::dialog_utils::init_common_controls();
     crate::window::register_window_class()?;
 
-    let _hwnd = crate::window::create_window(&config, &theme)?;
+    // Create windows from upgrade state, reconnecting to daemon sessions
+    let mut any_created = false;
+    for window_state in &state.windows {
+        match crate::window::create_window_from_upgrade(&config, &theme, window_state) {
+            Ok(_hwnd) => {
+                any_created = true;
+                log::info!("Window restored successfully");
+            }
+            Err(e) => {
+                log::error!("Failed to create window from upgrade state: {}", e);
+            }
+        }
+    }
+
+    // Fall back to a fresh window if nothing was restored
+    if !any_created {
+        log::warn!("No windows restored from upgrade state, creating fresh window");
+        let _hwnd = crate::window::create_window(&config, &theme)?;
+    }
 
     // Message loop
     let mut msg = MSG::default();
