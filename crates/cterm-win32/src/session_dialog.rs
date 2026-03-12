@@ -174,10 +174,9 @@ unsafe extern "system" fn session_dialog_proc(
             if !nmhdr.is_null()
                 && (*nmhdr).code == NM_DBLCLK
                 && (*nmhdr).idFrom == IDC_SESSION_LIST as usize
+                && try_select_session(hwnd)
             {
-                if try_select_session(hwnd) {
-                    EndDialog(hwnd, IDOK as isize);
-                }
+                EndDialog(hwnd, IDOK as isize);
             }
             0
         }

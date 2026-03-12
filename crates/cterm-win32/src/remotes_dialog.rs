@@ -317,7 +317,7 @@ unsafe fn handle_remotes_command(hwnd: HWND, id: i32, code: u16) {
         }
         IDC_REMOTE_COMBO if code == CBN_SELCHANGE => {
             let is_updating =
-                REMOTES_STATE.with(|s| s.borrow().as_ref().map_or(false, |st| st.updating));
+                REMOTES_STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.updating));
             if !is_updating {
                 // Save current fields before switching
                 save_current_fields(hwnd);
@@ -337,7 +337,7 @@ unsafe fn handle_remotes_command(hwnd: HWND, id: i32, code: u16) {
         IDC_REMOTE_NAME | IDC_REMOTE_HOST if code == EN_CHANGE => {
             // Save and refresh combo to show updated name/host
             let is_updating =
-                REMOTES_STATE.with(|s| s.borrow().as_ref().map_or(false, |st| st.updating));
+                REMOTES_STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.updating));
             if !is_updating {
                 save_current_fields(hwnd);
                 refresh_combo(hwnd);

@@ -359,7 +359,6 @@ fn create_widgets(notebook: &Notebook) -> TemplateWidgets {
 }
 
 #[allow(clippy::type_complexity)]
-#[allow(clippy::type_complexity)]
 fn create_general_tab() -> (
     ScrolledWindow,
     Entry,
