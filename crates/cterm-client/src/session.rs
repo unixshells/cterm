@@ -182,13 +182,19 @@ impl SessionHandle {
     }
 
     /// Subscribe to screen updates (for remote rendering)
-    pub async fn stream_screen_updates(&self) -> Result<tonic::Streaming<ScreenUpdate>> {
+    /// Stream screen updates. If `incremental` is true, the daemon sends only
+    /// dirty rows instead of full screen snapshots (both sides run full emulation).
+    pub async fn stream_screen_updates(
+        &self,
+        incremental: bool,
+    ) -> Result<tonic::Streaming<ScreenUpdate>> {
         let response = self
             .client
             .lock()
             .await
             .stream_screen_updates(StreamScreenUpdatesRequest {
                 session_id: self.session_id.clone(),
+                incremental,
             })
             .await?;
 

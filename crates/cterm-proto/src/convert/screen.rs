@@ -148,6 +148,41 @@ pub fn screen_to_proto(screen: &Screen, include_scrollback: bool) -> proto::GetS
     }
 }
 
+/// Convert a single visible row from the screen to proto
+pub fn visible_row_to_proto(screen: &Screen, row_idx: usize) -> proto::Row {
+    let cells: Vec<Cell> = (0..screen.width())
+        .map(|col| screen.get_cell(row_idx, col).cloned().unwrap_or_default())
+        .collect();
+    row_to_proto(&cells)
+}
+
+/// Convert all visible rows to proto (no scrollback)
+pub fn visible_rows_to_proto(screen: &Screen) -> Vec<proto::Row> {
+    (0..screen.height())
+        .map(|row_idx| visible_row_to_proto(screen, row_idx))
+        .collect()
+}
+
+/// Build a cursor position proto from the screen state
+pub fn cursor_to_proto(screen: &Screen) -> proto::CursorPosition {
+    proto::CursorPosition {
+        row: screen.cursor.row as u32,
+        col: screen.cursor.col as u32,
+        visible: screen.modes.show_cursor,
+        style: proto::CursorStyle::Block as i32,
+    }
+}
+
+/// Build terminal modes proto from the screen state
+pub fn modes_to_proto(screen: &Screen) -> proto::TerminalModes {
+    proto::TerminalModes {
+        application_cursor: screen.modes.application_cursor,
+        application_keypad: screen.modes.application_keypad,
+        bracketed_paste: screen.modes.bracketed_paste,
+        focus_events: screen.modes.focus_events,
+    }
+}
+
 /// Get screen text as lines
 pub fn screen_to_text(
     screen: &Screen,

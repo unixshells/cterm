@@ -1,8 +1,8 @@
 //! gRPC TerminalService implementation
 
 use crate::convert::{
-    cell_to_proto, event_to_proto, proto_to_key, proto_to_modifiers, screen_to_proto,
-    screen_to_text,
+    cell_to_proto, cursor_to_proto, event_to_proto, modes_to_proto, proto_to_key,
+    proto_to_modifiers, screen_to_proto, screen_to_text, visible_rows_to_proto,
 };
 use crate::proto::terminal_service_server::TerminalService;
 use crate::proto::*;
@@ -587,27 +587,158 @@ impl TerminalService for TerminalServiceImpl {
             .get_session(&req.session_id)
             .map_err(Status::from)?;
 
-        // For now, send a full screen update on each ContentChanged event
         let session_id = req.session_id.clone();
         let rx = session.subscribe_events();
         let session_ref = session.clone();
         let mut seq: u64 = 0;
+        let incremental = req.incremental;
+
+        // For incremental mode, maintain per-subscriber cache of last-sent state.
+        // Since both daemon and client run full terminal emulation, we only need
+        // to send the rows that actually changed.
+        let mut cached_rows: Vec<Row> = if incremental {
+            session_ref.with_terminal(|term| visible_rows_to_proto(term.screen()))
+        } else {
+            Vec::new()
+        };
+        let mut cached_cursor: Option<CursorPosition> = if incremental {
+            Some(session_ref.with_terminal(|term| cursor_to_proto(term.screen())))
+        } else {
+            None
+        };
+        let mut cached_modes: Option<TerminalModes> = if incremental {
+            Some(session_ref.with_terminal(|term| modes_to_proto(term.screen())))
+        } else {
+            None
+        };
+        // After a lag event, force a full screen resync
+        let mut needs_full_resync = false;
 
         let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
             Ok(event) => {
                 if matches!(event, cterm_core::term::TerminalEvent::ContentChanged) {
                     seq += 1;
-                    let screen_data =
-                        session_ref.with_terminal(|term| screen_to_proto(term.screen(), false));
-                    Some(Ok(ScreenUpdate {
-                        session_id: session_id.clone(),
-                        sequence: seq,
-                        update_type: Some(screen_update::UpdateType::FullScreen(
-                            FullScreenUpdate {
-                                screen: Some(screen_data),
-                            },
-                        )),
-                    }))
+
+                    if !incremental || needs_full_resync {
+                        // Non-incremental mode or resync after lag: send full screen
+                        let screen_data =
+                            session_ref.with_terminal(|term| screen_to_proto(term.screen(), false));
+
+                        if incremental {
+                            // Rebuild cache after resync
+                            cached_rows = screen_data.visible_rows.clone();
+                            cached_cursor = screen_data.cursor;
+                            cached_modes = screen_data.modes;
+                            needs_full_resync = false;
+                        }
+
+                        Some(Ok(ScreenUpdate {
+                            session_id: session_id.clone(),
+                            sequence: seq,
+                            update_type: Some(screen_update::UpdateType::FullScreen(
+                                FullScreenUpdate {
+                                    screen: Some(screen_data),
+                                },
+                            )),
+                        }))
+                    } else {
+                        // Incremental mode: diff current screen against cache
+                        let (dirty_rows, new_rows, cur_cursor, cur_modes) = session_ref
+                            .with_terminal(|term| {
+                                let screen = term.screen();
+                                let current_rows = visible_rows_to_proto(screen);
+                                let cursor = cursor_to_proto(screen);
+                                let modes = modes_to_proto(screen);
+
+                                // Find rows that changed
+                                let mut dirty = Vec::new();
+                                let height = current_rows.len();
+                                let old_height = cached_rows.len();
+
+                                for i in 0..height {
+                                    let changed = if i >= old_height {
+                                        true // new row (screen grew)
+                                    } else {
+                                        current_rows[i] != cached_rows[i]
+                                    };
+                                    if changed {
+                                        dirty.push(DirtyRow {
+                                            row_index: i as u32,
+                                            cells: current_rows[i].cells.clone(),
+                                        });
+                                    }
+                                }
+
+                                (dirty, current_rows, cursor, modes)
+                            });
+
+                        // Check cursor and modes changes
+                        let cursor_changed = cached_cursor.as_ref() != Some(&cur_cursor);
+                        let modes_changed = cached_modes.as_ref() != Some(&cur_modes);
+
+                        // Update cache
+                        cached_rows = new_rows;
+
+                        if dirty_rows.is_empty() && !cursor_changed && !modes_changed {
+                            // Nothing actually changed (e.g. selection-only update)
+                            return None;
+                        }
+
+                        // If most rows changed, send full screen instead
+                        let height = cached_rows.len();
+                        if dirty_rows.len() > height * 3 / 4 {
+                            cached_cursor = Some(cur_cursor);
+                            cached_modes = Some(cur_modes);
+                            let screen_data = FullScreenUpdate {
+                                screen: Some(GetScreenResponse {
+                                    cols: if height > 0 {
+                                        cached_rows[0].cells.len() as u32
+                                    } else {
+                                        0
+                                    },
+                                    rows: height as u32,
+                                    cursor: cached_cursor,
+                                    visible_rows: cached_rows.clone(),
+                                    scrollback: Vec::new(),
+                                    title: session_ref.title(),
+                                    modes: cached_modes,
+                                }),
+                            };
+                            return Some(Ok(ScreenUpdate {
+                                session_id: session_id.clone(),
+                                sequence: seq,
+                                update_type: Some(screen_update::UpdateType::FullScreen(
+                                    screen_data,
+                                )),
+                            }));
+                        }
+
+                        // Send dirty rows with optional cursor/modes
+                        let cursor_update = if cursor_changed {
+                            cached_cursor = Some(cur_cursor);
+                            Some(cur_cursor)
+                        } else {
+                            None
+                        };
+                        let modes_update = if modes_changed {
+                            cached_modes = Some(cur_modes);
+                            Some(cur_modes)
+                        } else {
+                            None
+                        };
+
+                        Some(Ok(ScreenUpdate {
+                            session_id: session_id.clone(),
+                            sequence: seq,
+                            update_type: Some(screen_update::UpdateType::DirtyRows(
+                                DirtyRowsUpdate {
+                                    rows: dirty_rows,
+                                    cursor: cursor_update,
+                                    modes: modes_update,
+                                },
+                            )),
+                        }))
+                    }
                 } else if matches!(event, cterm_core::term::TerminalEvent::TitleChanged(_)) {
                     seq += 1;
                     let title = session_ref.title();
@@ -626,6 +757,10 @@ impl TerminalService for TerminalServiceImpl {
                     count,
                     session_id,
                 );
+                if incremental {
+                    // Force full resync on next event to ensure client state is correct
+                    needs_full_resync = true;
+                }
                 None
             }
         });

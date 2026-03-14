@@ -9,5 +9,6 @@ pub use color::{color_to_proto, proto_to_color};
 pub use events::event_to_proto;
 pub use key::{key_to_proto, modifiers_to_proto, proto_to_key, proto_to_modifiers};
 pub use screen::{
-    attrs_to_proto, cell_to_proto, proto_to_attrs, row_to_proto, screen_to_proto, screen_to_text,
+    attrs_to_proto, cell_to_proto, cursor_to_proto, modes_to_proto, proto_to_attrs, row_to_proto,
+    screen_to_proto, screen_to_text, visible_row_to_proto, visible_rows_to_proto,
 };

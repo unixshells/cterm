@@ -284,6 +284,9 @@ message OutputChunk {
 
 message StreamScreenUpdatesRequest {
   string session_id = 1;
+  // If true, send incremental updates (dirty rows only) instead of full screen snapshots.
+  // Both sides run full terminal emulation, so the client can reconstruct state from diffs.
+  bool incremental = 2;
 }
 
 message ScreenUpdate {
@@ -305,6 +308,10 @@ message FullScreenUpdate {
 
 message DirtyRowsUpdate {
   repeated DirtyRow rows = 1;
+  // Include cursor position when it changed
+  optional CursorPosition cursor = 2;
+  // Include terminal modes when they changed
+  optional TerminalModes modes = 3;
 }
 
 message DirtyRow {
