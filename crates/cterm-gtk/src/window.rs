@@ -636,31 +636,13 @@ impl CtermWindow {
             let tab_bar = tab_bar.clone();
             let action = gio::SimpleAction::new("set-title", None);
             action.connect_activate(move |_, _| {
-                let current_title = {
-                    if let Some(page_idx) = notebook.current_page() {
-                        let tabs = tabs.borrow();
-                        tabs.get(page_idx as usize)
-                            .map(|t| t.title.clone())
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    }
-                };
-                let tabs_clone = Rc::clone(&tabs);
-                let notebook_clone = notebook.clone();
-                let tab_bar_clone = tab_bar.clone();
-                let window_title = window_clone.clone();
-                dialogs::show_set_title_dialog(&window_clone, &current_title, move |new_title| {
-                    if let Some(page_idx) = notebook_clone.current_page() {
-                        let mut tabs = tabs_clone.borrow_mut();
-                        if let Some(tab) = tabs.get_mut(page_idx as usize) {
-                            tab.title = new_title.clone();
-                            tab.title_locked = true; // Lock title so OSC won't override
-                            tab_bar_clone.set_title(tab.id, &new_title);
-                            window_title.set_title(Some(&new_title));
-                        }
-                    }
-                });
+                // Find the tab_id for the current page
+                let tab_id = notebook
+                    .current_page()
+                    .and_then(|idx| tabs.borrow().get(idx as usize).map(|t| t.id));
+                if let Some(tab_id) = tab_id {
+                    show_rename_tab_dialog(&window_clone, &tabs, &tab_bar, tab_id);
+                }
             });
             window.add_action(&action);
         }
@@ -1796,27 +1778,7 @@ impl CtermWindow {
             let tab_bar = self.tab_bar.clone();
             let window = self.window.clone();
             self.tab_bar.set_on_rename(move |tab_id| {
-                let current_title = {
-                    let tabs = tabs.borrow();
-                    tabs.iter()
-                        .find(|t| t.id == tab_id)
-                        .map(|t| t.title.clone())
-                        .unwrap_or_default()
-                };
-                let tabs_clone = Rc::clone(&tabs);
-                let tab_bar_clone = tab_bar.clone();
-                let window_clone = window.clone();
-                dialogs::show_set_title_dialog(&window, &current_title, move |new_title| {
-                    let mut tabs = tabs_clone.borrow_mut();
-                    if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
-                        tab.title = new_title.clone();
-                        tab.title_locked = true;
-                        tab_bar_clone.set_title(tab_id, &new_title);
-                        window_clone.set_title(Some(&new_title));
-                        // Persist custom title to daemon
-                        tab.terminal.set_custom_title(&new_title);
-                    }
-                });
+                show_rename_tab_dialog(&window, &tabs, &tab_bar, tab_id);
             });
         }
 
@@ -2017,6 +1979,37 @@ impl CtermWindow {
             }
         });
     }
+}
+
+/// Show the rename dialog for a tab and persist the new title.
+/// Used by both the menu bar "Set Title" action and the right-click context menu.
+fn show_rename_tab_dialog(
+    window: &ApplicationWindow,
+    tabs: &Rc<RefCell<Vec<TabEntry>>>,
+    tab_bar: &TabBar,
+    tab_id: u64,
+) {
+    let current_title = {
+        let tabs = tabs.borrow();
+        tabs.iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.title.clone())
+            .unwrap_or_default()
+    };
+    let tabs_clone = Rc::clone(tabs);
+    let tab_bar_clone = tab_bar.clone();
+    let window_clone = window.clone();
+    dialogs::show_set_title_dialog(window, &current_title, move |new_title| {
+        let mut tabs = tabs_clone.borrow_mut();
+        if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.title = new_title.clone();
+            tab.title_locked = true;
+            tab_bar_clone.set_title(tab_id, &new_title);
+            window_clone.set_title(Some(&new_title));
+            // Persist custom title to daemon
+            tab.terminal.set_custom_title(&new_title);
+        }
+    });
 }
 
 /// Generate a unique tab ID from the shared counter
