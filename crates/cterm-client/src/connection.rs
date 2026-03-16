@@ -165,18 +165,15 @@ impl DaemonConnection {
     /// The `host` parameter can be `user@hostname` or just `hostname`.
     #[cfg(unix)]
     pub async fn connect_ssh(host: &str) -> Result<Self> {
-        use tokio::process::Command as TokioCommand;
-
         log::info!("Connecting to {} via SSH", host);
 
         // 1. Single SSH command: find/install ctermd, start daemon, print socket path
         let script = remote_setup_script();
-        let output = TokioCommand::new("ssh")
+        let output = Command::new("ssh")
             .args([host, &script])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .await
             .map_err(|e| ClientError::Connection(format!("Failed to run ssh: {}", e)))?;
 
         // Log any stderr (install progress, warnings, etc.)
@@ -225,12 +222,14 @@ impl DaemonConnection {
             std::fs::create_dir_all(parent).ok();
         }
 
-        // 3. Start SSH tunnel: forward remote Unix socket to local Unix socket
+        // 3. Start SSH tunnel as a standalone process (not tied to tokio runtime).
+        // Using std::process::Command so the tunnel outlives the creating runtime —
+        // the daemon reader thread creates its own runtime and reconnects via this socket.
         let forward_spec = format!("{}:{}", local_socket.display(), remote_socket);
 
         log::info!("Starting SSH tunnel: -L {}", forward_spec);
 
-        let tunnel = TokioCommand::new("ssh")
+        let mut tunnel = Command::new("ssh")
             .args([
                 "-N", // No remote command
                 "-o",
@@ -244,7 +243,6 @@ impl DaemonConnection {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
             .spawn()
             .map_err(|e| ClientError::Connection(format!("Failed to start SSH tunnel: {}", e)))?;
 
@@ -257,6 +255,15 @@ impl DaemonConnection {
         }
 
         if !local_socket.exists() {
+            // Tunnel failed — collect stderr for diagnostics
+            let _ = tunnel.kill();
+            let output = tunnel.wait_with_output().ok();
+            let stderr = output
+                .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+                .unwrap_or_default();
+            if !stderr.is_empty() {
+                log::error!("SSH tunnel stderr: {}", stderr.trim());
+            }
             return Err(ClientError::Connection(format!(
                 "SSH tunnel failed to create local socket at {}",
                 local_socket.display()
@@ -266,20 +273,14 @@ impl DaemonConnection {
         // 4. Connect to the forwarded socket
         let conn = Self::try_connect_unix(&local_socket).await?;
 
-        // Keep the tunnel process alive in the background
-        tokio::spawn(async move {
-            let local_socket_cleanup = local_socket;
-            match tunnel.wait_with_output().await {
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if !stderr.is_empty() {
-                        log::warn!("SSH tunnel stderr: {}", stderr.trim());
-                    }
-                    log::info!("SSH tunnel exited: {}", output.status);
-                }
+        // Keep the tunnel process alive in a background thread (not a tokio task,
+        // so it survives runtime drops). Clean up the socket when the tunnel exits.
+        let local_socket_cleanup = local_socket;
+        std::thread::spawn(move || {
+            match tunnel.wait() {
+                Ok(status) => log::info!("SSH tunnel exited: {}", status),
                 Err(e) => log::error!("SSH tunnel error: {}", e),
             }
-            // Clean up local socket
             let _ = std::fs::remove_file(&local_socket_cleanup);
         });
 
