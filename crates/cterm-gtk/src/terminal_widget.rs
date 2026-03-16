@@ -969,10 +969,11 @@ impl TerminalWidget {
             daemon_cmd_tx: Some(cmd_tx.clone()),
         };
 
+        let daemon_socket = session.socket_path().map(|p| p.to_owned());
         widget.setup_drawing();
         widget.setup_input();
         widget.setup_drop();
-        widget.setup_daemon_reader(sid, cmd_rx);
+        widget.setup_daemon_reader(sid, cmd_rx, daemon_socket);
         widget.setup_daemon_resize(cmd_tx);
 
         widget
@@ -1041,10 +1042,11 @@ impl TerminalWidget {
             daemon_cmd_tx: Some(cmd_tx.clone()),
         };
 
+        let daemon_socket = recon.handle.socket_path().map(|p| p.to_owned());
         widget.setup_drawing();
         widget.setup_input();
         widget.setup_drop();
-        widget.setup_daemon_reader(sid, cmd_rx);
+        widget.setup_daemon_reader(sid, cmd_rx, daemon_socket);
         widget.setup_daemon_resize(cmd_tx);
 
         widget
@@ -1055,10 +1057,14 @@ impl TerminalWidget {
     ///
     /// Creates a fresh daemon connection in its own tokio runtime because tonic
     /// channels are tied to the runtime that created them.
+    ///
+    /// `daemon_socket` specifies which socket to connect to. For remote (SSH-tunneled)
+    /// sessions this is the local forwarded socket; for local sessions it's None.
     fn setup_daemon_reader(
         &self,
         session_id: String,
         cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCommand>,
+        daemon_socket: Option<std::path::PathBuf>,
     ) {
         let drawing_area = self.drawing_area.clone();
 
@@ -1072,8 +1078,12 @@ impl TerminalWidget {
                 .expect("Failed to create tokio runtime for daemon reader");
 
             rt.block_on(async move {
-                // Create a fresh connection to the daemon
-                let conn = match cterm_client::DaemonConnection::connect_local().await {
+                // Create a fresh connection to the same daemon (local or SSH-forwarded)
+                let conn = match if let Some(ref path) = daemon_socket {
+                    cterm_client::DaemonConnection::connect_unix(path, false).await
+                } else {
+                    cterm_client::DaemonConnection::connect_local().await
+                } {
                     Ok(c) => c,
                     Err(e) => {
                         log::error!("Failed to connect to daemon for output stream: {}", e);

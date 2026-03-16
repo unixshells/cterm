@@ -621,6 +621,7 @@ impl WindowState {
             cols as u32,
             rows as u32,
             cmd_rx,
+            None, // local sessions only for now
         );
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -2079,6 +2080,9 @@ fn start_daemon_create_thread(
 }
 
 /// Start a background thread that connects to daemon, attaches to a session, and streams output.
+///
+/// `daemon_socket` specifies which socket to connect to. For remote (SSH-tunneled)
+/// sessions this is the local forwarded socket; for local sessions it's None.
 fn start_daemon_attach_thread(
     hwnd: usize,
     tab_id: u64,
@@ -2087,6 +2091,7 @@ fn start_daemon_attach_thread(
     cols: u32,
     rows: u32,
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCmd>,
+    daemon_socket: Option<std::path::PathBuf>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -2102,7 +2107,11 @@ fn start_daemon_attach_thread(
         };
 
         rt.block_on(async move {
-            let conn = match cterm_client::DaemonConnection::connect_local().await {
+            let conn = match if let Some(ref path) = daemon_socket {
+                cterm_client::DaemonConnection::connect_unix(path, false).await
+            } else {
+                cterm_client::DaemonConnection::connect_local().await
+            } {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("Failed to connect to daemon: {}", e);

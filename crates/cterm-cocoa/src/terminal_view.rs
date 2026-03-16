@@ -1397,8 +1397,9 @@ impl TerminalView {
 
         // Start daemon I/O thread — owns the connection, handles reads and writes
         let state_clone = state.clone();
+        let daemon_socket = session.socket_path().map(|p| p.to_owned());
         std::thread::spawn(move || {
-            Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx);
+            Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx, daemon_socket);
         });
 
         this.schedule_redraw_check(view_ptr, state);
@@ -1461,8 +1462,9 @@ impl TerminalView {
 
         // Start daemon I/O thread — owns the connection, handles reads and writes
         let state_clone = state.clone();
+        let daemon_socket = recon.handle.socket_path().map(|p| p.to_owned());
         std::thread::spawn(move || {
-            Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx);
+            Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx, daemon_socket);
         });
 
         this.schedule_redraw_check(view_ptr, state);
@@ -1477,11 +1479,16 @@ impl TerminalView {
     /// We create a fresh connection rather than reusing the session handle because
     /// tonic channels are tied to the tokio runtime that created them. The original
     /// runtime (from the connection thread) is dropped before this thread starts.
+    ///
+    /// `daemon_socket` specifies which socket to connect to. For remote (SSH-tunneled)
+    /// sessions this is the local forwarded socket; for local sessions it's None
+    /// (which falls back to `connect_local()`).
     fn read_daemon_loop(
         session_id: String,
         terminal: Arc<Mutex<Terminal>>,
         state: Arc<ViewState>,
         cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCommand>,
+        daemon_socket: Option<std::path::PathBuf>,
     ) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1489,8 +1496,12 @@ impl TerminalView {
             .expect("Failed to create tokio runtime for daemon reader");
 
         rt.block_on(async move {
-            // Create a fresh connection to the daemon for streaming
-            let conn = match cterm_client::DaemonConnection::connect_local().await {
+            // Create a fresh connection to the same daemon (local or SSH-forwarded)
+            let conn = match if let Some(ref path) = daemon_socket {
+                cterm_client::DaemonConnection::connect_unix(path, false).await
+            } else {
+                cterm_client::DaemonConnection::connect_local().await
+            } {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("Failed to connect to daemon for output stream: {}", e);

@@ -20,9 +20,10 @@ const GITHUB_REPO: &str = "KarpelesLab/cterm";
 ///
 /// The script:
 /// 1. Checks if `ctermd` is in PATH or at `~/.local/bin/ctermd`
-/// 2. If not found, detects the platform and downloads the latest release
-/// 3. Starts the daemon (daemonizes, returns immediately)
-/// 4. Prints the socket path
+/// 2. If found, checks if daemon is already running (socket exists) — if so, just prints path
+/// 3. If binary not found, detects the platform and downloads the latest release
+/// 4. Starts the daemon (daemonizes, returns immediately)
+/// 5. Prints the socket path
 #[cfg(unix)]
 fn remote_setup_script() -> String {
     format!(
@@ -32,6 +33,13 @@ if command -v ctermd >/dev/null 2>&1; then
   CTERMD=$(command -v ctermd)
 elif [ -x "$HOME/.local/bin/ctermd" ]; then
   CTERMD="$HOME/.local/bin/ctermd"
+fi
+if [ -n "$CTERMD" ]; then
+  SOCK=$("$CTERMD" --print-socket-path 2>/dev/null || echo "")
+  if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
+    echo "$SOCK"
+    exit 0
+  fi
 fi
 if [ -z "$CTERMD" ]; then
   ARCH=$(uname -m)
@@ -70,6 +78,9 @@ pub struct DaemonInfo {
     pub daemon_version: String,
     pub hostname: String,
     pub is_local: bool,
+    /// Socket path used for this connection (allows reconnecting from a different runtime).
+    /// Set for Unix socket and SSH-tunneled connections; None for TCP.
+    pub socket_path: Option<PathBuf>,
 }
 
 /// Options for creating a new terminal session
@@ -134,7 +145,7 @@ impl DaemonConnection {
             .connect()
             .await?;
 
-        Self::handshake(channel).await
+        Self::handshake(channel, None).await
     }
 
     /// Connect to a remote ctermd via SSH socket forwarding.
@@ -317,11 +328,11 @@ impl DaemonConnection {
             )));
         }
 
-        let socket_path = socket_path.to_owned();
+        let owned_path = socket_path.to_owned();
         let channel = tonic::transport::Endpoint::try_from("http://[::]:0")
             .map_err(|e| ClientError::Connection(e.to_string()))?
             .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
-                let path = socket_path.clone();
+                let path = owned_path.clone();
                 async move {
                     let stream = tokio::net::UnixStream::connect(path).await?;
                     Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
@@ -329,7 +340,7 @@ impl DaemonConnection {
             }))
             .await?;
 
-        Self::handshake(channel).await
+        Self::handshake(channel, Some(socket_path.to_owned())).await
     }
 
     /// Try to connect to an existing named pipe (Windows)
@@ -347,11 +358,11 @@ impl DaemonConnection {
                 }
             }))
             .await?;
-        Self::handshake(channel).await
+        Self::handshake(channel, Some(pipe_path.to_owned())).await
     }
 
     /// Perform the initial handshake with the daemon
-    async fn handshake(channel: Channel) -> Result<Self> {
+    async fn handshake(channel: Channel, socket_path: Option<PathBuf>) -> Result<Self> {
         let mut client = TerminalServiceClient::new(channel);
 
         let response = client
@@ -368,6 +379,7 @@ impl DaemonConnection {
             daemon_version: resp.daemon_version,
             hostname: resp.hostname,
             is_local: resp.is_local,
+            socket_path,
         };
 
         log::info!(

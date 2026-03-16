@@ -44,6 +44,12 @@ impl SessionHandle {
         &self.daemon_info.hostname
     }
 
+    /// Get the socket path used for this daemon connection (for reconnecting
+    /// from a different tokio runtime). Returns None for TCP connections.
+    pub fn socket_path(&self) -> Option<&std::path::Path> {
+        self.daemon_info.socket_path.as_deref()
+    }
+
     /// Write raw input bytes to the PTY
     pub async fn write_input(&self, data: &[u8]) -> Result<u32> {
         let response = self
