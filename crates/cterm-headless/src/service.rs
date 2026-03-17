@@ -628,7 +628,7 @@ impl TerminalService for TerminalServiceImpl {
                             // Rebuild cache after resync
                             cached_rows = screen_data.visible_rows.clone();
                             cached_cursor = screen_data.cursor;
-                            cached_modes = screen_data.modes;
+                            cached_modes = screen_data.modes.clone();
                             needs_full_resync = false;
                         }
 
@@ -689,6 +689,9 @@ impl TerminalService for TerminalServiceImpl {
                         if dirty_rows.len() > height * 3 / 4 {
                             cached_cursor = Some(cur_cursor);
                             cached_modes = Some(cur_modes);
+                            let drcs_fonts = session_ref.with_terminal(|term| {
+                                cterm_proto::convert::screen::drcs_fonts_to_proto(term.screen())
+                            });
                             let screen_data = FullScreenUpdate {
                                 screen: Some(GetScreenResponse {
                                     cols: if height > 0 {
@@ -701,7 +704,8 @@ impl TerminalService for TerminalServiceImpl {
                                     visible_rows: cached_rows.clone(),
                                     scrollback: Vec::new(),
                                     title: session_ref.title(),
-                                    modes: cached_modes,
+                                    modes: cached_modes.clone(),
+                                    drcs_fonts,
                                 }),
                             };
                             return Some(Ok(ScreenUpdate {
@@ -721,7 +725,7 @@ impl TerminalService for TerminalServiceImpl {
                             None
                         };
                         let modes_update = if modes_changed {
-                            cached_modes = Some(cur_modes);
+                            cached_modes = Some(cur_modes.clone());
                             Some(cur_modes)
                         } else {
                             None

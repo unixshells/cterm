@@ -2,6 +2,7 @@
 
 use crate::convert::color::{color_to_proto, proto_to_color};
 use crate::proto;
+use cterm_core::drcs::{DrcsFont, DrcsGlyph};
 use cterm_core::term::Terminal;
 use cterm_core::{Cell, CellAttrs, Screen};
 
@@ -99,6 +100,63 @@ pub fn row_to_proto(cells: &[Cell]) -> proto::Row {
     }
 }
 
+/// Convert a DRCS glyph to proto
+pub fn drcs_glyph_to_proto(char_position: u8, glyph: &DrcsGlyph) -> proto::DrcsGlyph {
+    proto::DrcsGlyph {
+        char_position: char_position as u32,
+        data: glyph.data.clone(),
+        width: glyph.width as u32,
+        height: glyph.height as u32,
+    }
+}
+
+/// Convert a DRCS font to proto
+pub fn drcs_font_to_proto(font: &DrcsFont) -> proto::DrcsFont {
+    proto::DrcsFont {
+        designator: font.designator.clone(),
+        font_number: font.font_number as u32,
+        cell_width: font.cell_width as u32,
+        cell_height: font.cell_height as u32,
+        is_96_char: font.is_96_char,
+        full_cell: font.full_cell,
+        glyphs: font
+            .glyphs
+            .iter()
+            .map(|(&pos, glyph)| drcs_glyph_to_proto(pos, glyph))
+            .collect(),
+    }
+}
+
+/// Convert proto DRCS font back to core type
+pub fn proto_to_drcs_font(proto_font: &proto::DrcsFont) -> DrcsFont {
+    let mut font = DrcsFont::new(
+        proto_font.font_number as u8,
+        proto_font.designator.clone(),
+        proto_font.cell_width as usize,
+        proto_font.cell_height as usize,
+        proto_font.is_96_char,
+        proto_font.full_cell,
+    );
+    for proto_glyph in &proto_font.glyphs {
+        let glyph = DrcsGlyph {
+            data: proto_glyph.data.clone(),
+            width: proto_glyph.width as usize,
+            height: proto_glyph.height as usize,
+        };
+        font.glyphs.insert(proto_glyph.char_position as u8, glyph);
+    }
+    font
+}
+
+/// Convert all DRCS fonts from screen to proto
+pub fn drcs_fonts_to_proto(screen: &Screen) -> Vec<proto::DrcsFont> {
+    screen
+        .drcs_fonts()
+        .values()
+        .map(drcs_font_to_proto)
+        .collect()
+}
+
 /// Convert screen to proto representation
 pub fn screen_to_proto(screen: &Screen, include_scrollback: bool) -> proto::GetScreenResponse {
     let cursor = proto::CursorPosition {
@@ -139,12 +197,8 @@ pub fn screen_to_proto(screen: &Screen, include_scrollback: bool) -> proto::GetS
         visible_rows,
         scrollback,
         title: screen.title.clone(),
-        modes: Some(proto::TerminalModes {
-            application_cursor: screen.modes.application_cursor,
-            application_keypad: screen.modes.application_keypad,
-            bracketed_paste: screen.modes.bracketed_paste,
-            focus_events: screen.modes.focus_events,
-        }),
+        modes: Some(modes_to_proto(screen)),
+        drcs_fonts: drcs_fonts_to_proto(screen),
     }
 }
 
@@ -180,6 +234,9 @@ pub fn modes_to_proto(screen: &Screen) -> proto::TerminalModes {
         application_keypad: screen.modes.application_keypad,
         bracketed_paste: screen.modes.bracketed_paste,
         focus_events: screen.modes.focus_events,
+        charset_g0: screen.modes.charset_g0.clone(),
+        charset_g1: screen.modes.charset_g1.clone(),
+        charset_g1_active: screen.modes.charset_g1_active,
     }
 }
 
@@ -286,6 +343,20 @@ pub fn apply_screen_snapshot(terminal: &mut Terminal, screen_data: &proto::GetSc
         screen.modes.application_keypad = modes.application_keypad;
         screen.modes.bracketed_paste = modes.bracketed_paste;
         screen.modes.focus_events = modes.focus_events;
+        screen.modes.charset_g0 = modes.charset_g0.clone();
+        screen.modes.charset_g1 = modes.charset_g1.clone();
+        screen.modes.charset_g1_active = modes.charset_g1_active;
+    }
+
+    // Restore DRCS soft fonts
+    if !screen_data.drcs_fonts.is_empty() {
+        screen.clear_drcs_fonts();
+        for proto_font in &screen_data.drcs_fonts {
+            let font = proto_to_drcs_font(proto_font);
+            // Use erase_control=0 (replace) since we're restoring from snapshot
+            let font_number = font.font_number;
+            screen.add_drcs_font(font, 0, font_number);
+        }
     }
 }
 

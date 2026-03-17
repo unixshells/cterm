@@ -349,6 +349,38 @@ message GetScreenResponse {
   repeated Row scrollback = 5;
   string title = 6;
   TerminalModes modes = 7;
+  // DRCS soft fonts
+  repeated DrcsFont drcs_fonts = 8;
+}
+
+// DRCS (Dynamically Redefinable Character Sets) soft font
+message DrcsFont {
+  // Character set designator (e.g., " @" for unregistered)
+  string designator = 1;
+  // Font number (0-2)
+  uint32 font_number = 2;
+  // Character matrix width in pixels
+  uint32 cell_width = 3;
+  // Character matrix height in pixels
+  uint32 cell_height = 4;
+  // Whether this is a 96-character set (vs 94)
+  bool is_96_char = 5;
+  // Whether this is a full-cell font (vs text font)
+  bool full_cell = 6;
+  // Glyphs in this font
+  repeated DrcsGlyph glyphs = 7;
+}
+
+// A single DRCS glyph (character bitmap)
+message DrcsGlyph {
+  // Character position index (0-95)
+  uint32 char_position = 1;
+  // Bitmap data (1 bit per pixel, row-major)
+  bytes data = 2;
+  // Width in pixels
+  uint32 width = 3;
+  // Height in pixels
+  uint32 height = 4;
 }
 
 message Row {
@@ -421,6 +453,10 @@ message TerminalModes {
   bool application_keypad = 2;
   bool bracketed_paste = 3;
   bool focus_events = 4;
+  // Character set designators for DRCS support
+  optional string charset_g0 = 5;
+  optional string charset_g1 = 6;
+  bool charset_g1_active = 7;
 }
 
 message GetCellRequest {
