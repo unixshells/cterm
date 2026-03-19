@@ -1613,6 +1613,63 @@ fn draw_terminal(
         cr.rectangle(x, y + cell_height - 1.0, preedit_width, 1.0);
         cr.fill().ok();
     }
+
+    // Draw scrollbar overlay when there is scrollback content
+    let scrollback_len = screen.scrollback().len();
+    if scrollback_len > 0 {
+        let total_lines = scrollback_len + rows;
+        let view_height = rows as f64 * cell_height;
+        let view_width = cols as f64 * cell_width;
+
+        let bar_width: f64 = 6.0;
+        let bar_inset: f64 = 2.0;
+        let bar_x = view_width - bar_width - bar_inset;
+        let min_thumb_height: f64 = 20.0;
+
+        let thumb_height = (rows as f64 / total_lines as f64 * view_height).max(min_thumb_height);
+
+        let scrollable = view_height - thumb_height;
+        let fraction = screen.scroll_offset as f64 / scrollback_len as f64;
+        // fraction=0 (at bottom) → thumb at bottom, fraction=1 → thumb at top
+        let thumb_y = (1.0 - fraction) * scrollable;
+
+        let opacity = if screen.scroll_offset > 0 { 0.5 } else { 0.25 };
+        let radius = bar_width / 2.0;
+
+        // Draw rounded rect thumb
+        cr.new_sub_path();
+        cr.arc(
+            bar_x + bar_width - radius,
+            thumb_y + radius,
+            radius,
+            -std::f64::consts::FRAC_PI_2,
+            0.0,
+        );
+        cr.arc(
+            bar_x + bar_width - radius,
+            thumb_y + thumb_height - radius,
+            radius,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+        );
+        cr.arc(
+            bar_x + radius,
+            thumb_y + thumb_height - radius,
+            radius,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+        );
+        cr.arc(
+            bar_x + radius,
+            thumb_y + radius,
+            radius,
+            std::f64::consts::PI,
+            3.0 * std::f64::consts::FRAC_PI_2,
+        );
+        cr.close_path();
+        cr.set_source_rgba(0.5, 0.5, 0.5, opacity);
+        cr.fill().ok();
+    }
 }
 
 /// Convert GTK modifier state to our Modifiers

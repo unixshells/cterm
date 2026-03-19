@@ -269,6 +269,87 @@ impl CGRenderer {
 
             self.draw_cursor(cursor_x, cursor_y, cursor_width);
         }
+
+        // Draw scrollbar overlay when there is scrollback content
+        let scrollback_len = screen.scrollback().len();
+        if scrollback_len > 0 {
+            self.draw_scrollbar(screen, bounds);
+        }
+    }
+
+    /// Draw a thin scrollbar overlay on the right edge of the terminal
+    fn draw_scrollbar(&self, screen: &cterm_core::Screen, bounds: NSRect) {
+        let scrollback_len = screen.scrollback().len();
+        let rows = screen.height();
+        let total_lines = scrollback_len + rows;
+        let view_height = bounds.size.height;
+
+        // Scrollbar geometry
+        let bar_width: f64 = 6.0;
+        let bar_inset: f64 = 2.0;
+        let bar_x = bounds.origin.x + bounds.size.width - bar_width - bar_inset;
+        let min_thumb_height: f64 = 20.0;
+
+        // Thumb height proportional to visible fraction
+        let thumb_height = (rows as f64 / total_lines as f64 * view_height).max(min_thumb_height);
+
+        // Thumb position: scroll_offset=0 means at bottom, scroll_offset=scrollback_len means at top
+        let scrollable = view_height - thumb_height;
+        let fraction = if scrollback_len > 0 {
+            screen.scroll_offset as f64 / scrollback_len as f64
+        } else {
+            0.0
+        };
+        // In macOS coordinate system, y=0 is bottom. fraction=0 (at bottom) should
+        // place thumb at y=0, fraction=1 (at top) at y=scrollable.
+        // But our rendering uses flipped coordinates (y=0 at top), so:
+        let thumb_y = (1.0 - fraction) * scrollable;
+
+        // Draw thumb with rounded corners
+        let opacity = if screen.scroll_offset > 0 { 0.5 } else { 0.25 };
+        let Some(context) = NSGraphicsContext::currentContext() else {
+            return;
+        };
+        unsafe {
+            let cg_context: *mut std::ffi::c_void = msg_send![&context, CGContext];
+
+            type CGPathRef = *const std::ffi::c_void;
+
+            extern "C" {
+                fn CGContextSetRGBFillColor(
+                    c: *mut std::ffi::c_void,
+                    r: f64,
+                    g: f64,
+                    b: f64,
+                    a: f64,
+                );
+                fn CGContextFillRect(c: *mut std::ffi::c_void, rect: [f64; 4]);
+                fn CGContextSaveGState(c: *mut std::ffi::c_void);
+                fn CGContextRestoreGState(c: *mut std::ffi::c_void);
+                fn CGContextAddPath(c: *mut std::ffi::c_void, path: CGPathRef);
+                fn CGContextClip(c: *mut std::ffi::c_void);
+                fn CGPathCreateWithRoundedRect(
+                    rect: [f64; 4],
+                    corner_width: f64,
+                    corner_height: f64,
+                    transform: *const std::ffi::c_void,
+                ) -> CGPathRef;
+                fn CGPathRelease(path: CGPathRef);
+            }
+
+            if !cg_context.is_null() {
+                let rect = [bar_x, thumb_y, bar_width, thumb_height];
+                let radius = bar_width / 2.0;
+                let path = CGPathCreateWithRoundedRect(rect, radius, radius, std::ptr::null());
+                CGContextSaveGState(cg_context);
+                CGContextAddPath(cg_context, path);
+                CGContextClip(cg_context);
+                CGContextSetRGBFillColor(cg_context, 0.5, 0.5, 0.5, opacity);
+                CGContextFillRect(cg_context, rect);
+                CGContextRestoreGState(cg_context);
+                CGPathRelease(path);
+            }
+        }
     }
 
     /// Render terminal images (Sixel graphics, etc.)
