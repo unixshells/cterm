@@ -11,7 +11,99 @@ use gtk4::{
     ResponseType, Window,
 };
 
-use cterm_app::config::{load_config, save_config, Config, ConnectionMethod, RemoteConfig};
+use cterm_app::config::{
+    load_config, save_config, Config, ConnectionMethod, ConnectionType, RemoteConfig,
+};
+
+/// All form fields wrapped for sharing across closures.
+struct Fields {
+    name: Rc<Entry>,
+    host: Rc<Entry>,
+    method: Rc<ComboBoxText>,
+    conn_type: Rc<ComboBoxText>,
+    proxy: Rc<Entry>,
+    relay_user: Rc<Entry>,
+    relay_device: Rc<Entry>,
+    session_name: Rc<Entry>,
+    remote_combo: Rc<ComboBoxText>,
+}
+
+impl Fields {
+    fn load(&self, config: &Rc<RefCell<Config>>) {
+        let idx = self.remote_combo.active().map(|i| i as usize);
+        let cfg = config.borrow();
+        if let Some(idx) = idx {
+            if let Some(remote) = cfg.remotes.get(idx) {
+                self.name.set_text(&remote.name);
+                self.host.set_text(&remote.host);
+                self.method.set_active(Some(match remote.method {
+                    ConnectionMethod::Daemon => 0,
+                    ConnectionMethod::Mosh => 1,
+                }));
+                self.conn_type
+                    .set_active(Some(match remote.connection_type {
+                        ConnectionType::Direct => 0,
+                        ConnectionType::Relay => 1,
+                    }));
+                self.proxy
+                    .set_text(remote.proxy_jump.as_deref().unwrap_or(""));
+                self.relay_user
+                    .set_text(remote.relay_username.as_deref().unwrap_or(""));
+                self.relay_device
+                    .set_text(remote.relay_device.as_deref().unwrap_or(""));
+                self.session_name
+                    .set_text(remote.session_name.as_deref().unwrap_or(""));
+                return;
+            }
+        }
+        self.name.set_text("");
+        self.host.set_text("");
+        self.method.set_active(Some(0));
+        self.conn_type.set_active(Some(0));
+        self.proxy.set_text("");
+        self.relay_user.set_text("");
+        self.relay_device.set_text("");
+        self.session_name.set_text("");
+    }
+
+    fn save(&self, config: &Rc<RefCell<Config>>) {
+        let idx = self.remote_combo.active().map(|i| i as usize);
+        if let Some(idx) = idx {
+            let mut cfg = config.borrow_mut();
+            if let Some(remote) = cfg.remotes.get_mut(idx) {
+                remote.name = self.name.text().to_string();
+                remote.host = self.host.text().to_string();
+                remote.method = match self.method.active() {
+                    Some(1) => ConnectionMethod::Mosh,
+                    _ => ConnectionMethod::Daemon,
+                };
+                remote.connection_type = match self.conn_type.active() {
+                    Some(1) => ConnectionType::Relay,
+                    _ => ConnectionType::Direct,
+                };
+                set_opt(&self.proxy, &mut remote.proxy_jump);
+                set_opt(&self.relay_user, &mut remote.relay_username);
+                set_opt(&self.relay_device, &mut remote.relay_device);
+                set_opt(&self.session_name, &mut remote.session_name);
+            }
+        }
+    }
+}
+
+fn set_opt(entry: &Entry, target: &mut Option<String>) {
+    let val = entry.text().to_string();
+    *target = if val.is_empty() { None } else { Some(val) };
+}
+
+fn populate_combo(combo: &ComboBoxText, remotes: &[RemoteConfig]) {
+    combo.remove_all();
+    for remote in remotes {
+        combo.append_text(&format!("{} ({})", remote.name, remote.host));
+    }
+    if remotes.is_empty() {
+        combo.append_text("(no remotes)");
+    }
+}
 
 /// Show the Manage Remotes dialog
 pub fn show_remotes_dialog<F>(parent: &impl IsA<Window>, on_save: F)
@@ -26,7 +118,7 @@ where
         .transient_for(parent)
         .modal(true)
         .default_width(400)
-        .default_height(220)
+        .default_height(380)
         .build();
 
     dialog.add_button("Cancel", ResponseType::Cancel);
@@ -51,199 +143,142 @@ where
     top_row.append(&remove_btn);
     content.append(&top_row);
 
-    // Name / Host fields
+    // Fields grid
     let grid = Grid::new();
     grid.set_row_spacing(8);
     grid.set_column_spacing(12);
 
-    let name_label = Label::new(Some("Name:"));
-    name_label.set_halign(Align::End);
-    grid.attach(&name_label, 0, 0, 1, 1);
+    let mut row = 0;
+
     let name_entry = Entry::new();
     name_entry.set_placeholder_text(Some("my-server"));
     name_entry.set_hexpand(true);
-    grid.attach(&name_entry, 1, 0, 1, 1);
+    attach_label(&grid, "Name:", row);
+    grid.attach(&name_entry, 1, row, 1, 1);
+    row += 1;
 
-    let host_label = Label::new(Some("Host:"));
-    host_label.set_halign(Align::End);
-    grid.attach(&host_label, 0, 1, 1, 1);
     let host_entry = Entry::new();
     host_entry.set_placeholder_text(Some("user@hostname"));
     host_entry.set_hexpand(true);
-    grid.attach(&host_entry, 1, 1, 1, 1);
+    attach_label(&grid, "Host:", row);
+    grid.attach(&host_entry, 1, row, 1, 1);
+    row += 1;
 
-    let method_label = Label::new(Some("Method:"));
-    method_label.set_halign(Align::End);
-    grid.attach(&method_label, 0, 2, 1, 1);
     let method_combo = ComboBoxText::new();
     method_combo.append_text("ctermd");
     method_combo.append_text("Mosh");
     method_combo.set_active(Some(0));
-    grid.attach(&method_combo, 1, 2, 1, 1);
+    attach_label(&grid, "Method:", row);
+    grid.attach(&method_combo, 1, row, 1, 1);
+    row += 1;
 
-    let proxy_label = Label::new(Some("Proxy Jump:"));
-    proxy_label.set_halign(Align::End);
-    grid.attach(&proxy_label, 0, 3, 1, 1);
+    let conn_type_combo = ComboBoxText::new();
+    conn_type_combo.append_text("Direct");
+    conn_type_combo.append_text("Relay");
+    conn_type_combo.set_active(Some(0));
+    attach_label(&grid, "Type:", row);
+    grid.attach(&conn_type_combo, 1, row, 1, 1);
+    row += 1;
+
     let proxy_entry = Entry::new();
-    proxy_entry.set_placeholder_text(Some("relay.example.com"));
+    proxy_entry.set_placeholder_text(Some("unixshells.com"));
     proxy_entry.set_hexpand(true);
-    grid.attach(&proxy_entry, 1, 3, 1, 1);
+    attach_label(&grid, "Proxy/Relay:", row);
+    grid.attach(&proxy_entry, 1, row, 1, 1);
+    row += 1;
+
+    let relay_user_entry = Entry::new();
+    relay_user_entry.set_placeholder_text(Some("username"));
+    relay_user_entry.set_hexpand(true);
+    attach_label(&grid, "Relay User:", row);
+    grid.attach(&relay_user_entry, 1, row, 1, 1);
+    row += 1;
+
+    let relay_device_entry = Entry::new();
+    relay_device_entry.set_placeholder_text(Some("device-name"));
+    relay_device_entry.set_hexpand(true);
+    attach_label(&grid, "Device:", row);
+    grid.attach(&relay_device_entry, 1, row, 1, 1);
+    row += 1;
+
+    let session_name_entry = Entry::new();
+    session_name_entry.set_placeholder_text(Some("default"));
+    session_name_entry.set_hexpand(true);
+    attach_label(&grid, "Session:", row);
+    grid.attach(&session_name_entry, 1, row, 1, 1);
 
     content.append(&grid);
 
-    // Wrap entries for sharing across closures
-    let name_entry = Rc::new(name_entry);
-    let host_entry = Rc::new(host_entry);
-    let method_combo = Rc::new(method_combo);
-    let proxy_entry = Rc::new(proxy_entry);
-    let remote_combo = Rc::new(remote_combo);
+    let fields = Rc::new(Fields {
+        name: Rc::new(name_entry),
+        host: Rc::new(host_entry),
+        method: Rc::new(method_combo),
+        conn_type: Rc::new(conn_type_combo),
+        proxy: Rc::new(proxy_entry),
+        relay_user: Rc::new(relay_user_entry),
+        relay_device: Rc::new(relay_device_entry),
+        session_name: Rc::new(session_name_entry),
+        remote_combo: Rc::new(remote_combo),
+    });
 
     // Populate combo
     {
         let cfg = config.borrow();
-        populate_combo(&remote_combo, &cfg.remotes);
+        populate_combo(&fields.remote_combo, &cfg.remotes);
         if !cfg.remotes.is_empty() {
-            remote_combo.set_active(Some(0));
-        }
-    }
-
-    // Load selected remote into fields
-    fn load_selected(
-        combo: &ComboBoxText,
-        config: &Rc<RefCell<Config>>,
-        name_entry: &Entry,
-        host_entry: &Entry,
-        method_combo: &ComboBoxText,
-        proxy_entry: &Entry,
-    ) {
-        let idx = combo.active().map(|i| i as usize);
-        let cfg = config.borrow();
-        if let Some(idx) = idx {
-            if let Some(remote) = cfg.remotes.get(idx) {
-                name_entry.set_text(&remote.name);
-                host_entry.set_text(&remote.host);
-                method_combo.set_active(Some(match remote.method {
-                    ConnectionMethod::Daemon => 0,
-                    ConnectionMethod::Mosh => 1,
-                }));
-                proxy_entry.set_text(remote.proxy_jump.as_deref().unwrap_or(""));
-                return;
-            }
-        }
-        name_entry.set_text("");
-        host_entry.set_text("");
-        method_combo.set_active(Some(0));
-        proxy_entry.set_text("");
-    }
-
-    fn save_current(
-        combo: &ComboBoxText,
-        config: &Rc<RefCell<Config>>,
-        name_entry: &Entry,
-        host_entry: &Entry,
-        method_combo: &ComboBoxText,
-        proxy_entry: &Entry,
-    ) {
-        let idx = combo.active().map(|i| i as usize);
-        if let Some(idx) = idx {
-            let mut cfg = config.borrow_mut();
-            if let Some(remote) = cfg.remotes.get_mut(idx) {
-                remote.name = name_entry.text().to_string();
-                remote.host = host_entry.text().to_string();
-                remote.method = match method_combo.active() {
-                    Some(1) => ConnectionMethod::Mosh,
-                    _ => ConnectionMethod::Daemon,
-                };
-                let proxy = proxy_entry.text().to_string();
-                remote.proxy_jump = if proxy.is_empty() { None } else { Some(proxy) };
-            }
-        }
-    }
-
-    fn populate_combo(combo: &ComboBoxText, remotes: &[RemoteConfig]) {
-        combo.remove_all();
-        for remote in remotes {
-            combo.append_text(&format!("{} ({})", remote.name, remote.host));
-        }
-        if remotes.is_empty() {
-            combo.append_text("(no remotes)");
+            fields.remote_combo.set_active(Some(0));
         }
     }
 
     // Load initial selection
-    load_selected(
-        &remote_combo,
-        &config,
-        &name_entry,
-        &host_entry,
-        &method_combo,
-        &proxy_entry,
-    );
+    fields.load(&config);
 
     // Combo changed → load selected
     {
         let config = Rc::clone(&config);
-        let name_entry = Rc::clone(&name_entry);
-        let host_entry = Rc::clone(&host_entry);
-        let method_combo = Rc::clone(&method_combo);
-        let proxy_entry = Rc::clone(&proxy_entry);
-        let combo = Rc::clone(&remote_combo);
-        remote_combo.connect_changed(move |_| {
-            load_selected(
-                &combo,
-                &config,
-                &name_entry,
-                &host_entry,
-                &method_combo,
-                &proxy_entry,
-            );
-        });
+        let fields = Rc::clone(&fields);
+        fields
+            .remote_combo
+            .connect_changed(move |_| fields.load(&config));
     }
 
-    // Name/host/method/proxy changed → save current to config and refresh combo
+    // Field changes → save and refresh combo
     {
         let config = Rc::clone(&config);
-        let name_entry_c = Rc::clone(&name_entry);
-        let host_entry_c = Rc::clone(&host_entry);
-        let method_combo_c = Rc::clone(&method_combo);
-        let proxy_entry_c = Rc::clone(&proxy_entry);
-        let combo = Rc::clone(&remote_combo);
+        let fields = Rc::clone(&fields);
         let update = move || {
-            save_current(
-                &combo,
-                &config,
-                &name_entry_c,
-                &host_entry_c,
-                &method_combo_c,
-                &proxy_entry_c,
-            );
-            let idx = combo.active();
+            fields.save(&config);
+            let idx = fields.remote_combo.active();
             let cfg = config.borrow();
-            populate_combo(&combo, &cfg.remotes);
+            populate_combo(&fields.remote_combo, &cfg.remotes);
             if let Some(idx) = idx {
-                combo.set_active(Some(idx));
+                fields.remote_combo.set_active(Some(idx));
             }
         };
         let update = Rc::new(update);
 
         let u = Rc::clone(&update);
-        name_entry.connect_changed(move |_| u());
+        fields.name.connect_changed(move |_| u());
         let u = Rc::clone(&update);
-        host_entry.connect_changed(move |_| u());
+        fields.host.connect_changed(move |_| u());
         let u = Rc::clone(&update);
-        method_combo.connect_changed(move |_| u());
+        fields.method.connect_changed(move |_| u());
         let u = Rc::clone(&update);
-        proxy_entry.connect_changed(move |_| u());
+        fields.conn_type.connect_changed(move |_| u());
+        let u = Rc::clone(&update);
+        fields.proxy.connect_changed(move |_| u());
+        let u = Rc::clone(&update);
+        fields.relay_user.connect_changed(move |_| u());
+        let u = Rc::clone(&update);
+        fields.relay_device.connect_changed(move |_| u());
+        let u = Rc::clone(&update);
+        fields.session_name.connect_changed(move |_| u());
     }
 
     // Add button
     {
         let config = Rc::clone(&config);
-        let combo = Rc::clone(&remote_combo);
-        let name_entry = Rc::clone(&name_entry);
-        let host_entry = Rc::clone(&host_entry);
-        let method_combo = Rc::clone(&method_combo);
-        let proxy_entry = Rc::clone(&proxy_entry);
+        let fields = Rc::clone(&fields);
         add_btn.connect_clicked(move |_| {
             let mut cfg = config.borrow_mut();
             let name = format!("remote-{}", cfg.remotes.len() + 1);
@@ -251,51 +286,37 @@ where
                 name,
                 host: String::new(),
                 method: Default::default(),
+                connection_type: Default::default(),
                 proxy_jump: None,
+                relay_username: None,
+                relay_device: None,
+                session_name: None,
             });
             let new_idx = cfg.remotes.len() - 1;
-            populate_combo(&combo, &cfg.remotes);
-            combo.set_active(Some(new_idx as u32));
+            populate_combo(&fields.remote_combo, &cfg.remotes);
+            fields.remote_combo.set_active(Some(new_idx as u32));
             drop(cfg);
-            load_selected(
-                &combo,
-                &config,
-                &name_entry,
-                &host_entry,
-                &method_combo,
-                &proxy_entry,
-            );
+            fields.load(&config);
         });
     }
 
     // Remove button
     {
         let config = Rc::clone(&config);
-        let combo = Rc::clone(&remote_combo);
-        let name_entry = Rc::clone(&name_entry);
-        let host_entry = Rc::clone(&host_entry);
-        let method_combo = Rc::clone(&method_combo);
-        let proxy_entry = Rc::clone(&proxy_entry);
+        let fields = Rc::clone(&fields);
         remove_btn.connect_clicked(move |_| {
-            if let Some(idx) = combo.active() {
+            if let Some(idx) = fields.remote_combo.active() {
                 let mut cfg = config.borrow_mut();
                 let idx = idx as usize;
                 if idx < cfg.remotes.len() {
                     cfg.remotes.remove(idx);
                 }
-                populate_combo(&combo, &cfg.remotes);
+                populate_combo(&fields.remote_combo, &cfg.remotes);
                 if !cfg.remotes.is_empty() {
-                    combo.set_active(Some(0));
+                    fields.remote_combo.set_active(Some(0));
                 }
                 drop(cfg);
-                load_selected(
-                    &combo,
-                    &config,
-                    &name_entry,
-                    &host_entry,
-                    &method_combo,
-                    &proxy_entry,
-                );
+                fields.load(&config);
             }
         });
     }
@@ -314,4 +335,10 @@ where
     });
 
     dialog.present();
+}
+
+fn attach_label(grid: &Grid, text: &str, row: i32) {
+    let label = Label::new(Some(text));
+    label.set_halign(Align::End);
+    grid.attach(&label, 0, row, 1, 1);
 }

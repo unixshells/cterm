@@ -57,6 +57,17 @@ pub enum ConnectionMethod {
     Mosh,
 }
 
+/// Connection type: direct SSH or via relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionType {
+    /// Direct SSH to the target host
+    #[default]
+    Direct,
+    /// Via relay server (3-hop SSH tunnel: jump host → tunnel → target)
+    Relay,
+}
+
 /// A named remote host for daemon-backed or mosh sessions.
 ///
 /// Templates can reference a remote by name. When launched, cterm connects
@@ -69,7 +80,11 @@ pub enum ConnectionMethod {
 /// name = "dev-server"
 /// host = "user@dev.example.com"
 /// method = "daemon"  # or "mosh"
+/// connection_type = "direct"  # or "relay"
 /// proxy_jump = "relay.example.com"  # optional, for NAT traversal
+/// relay_username = "myuser"  # relay account username
+/// relay_device = "mydevice"  # relay device name
+/// session_name = "default"  # latch session name
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
@@ -80,9 +95,21 @@ pub struct RemoteConfig {
     /// Connection method (defaults to "daemon")
     #[serde(default)]
     pub method: ConnectionMethod,
+    /// Connection type: direct or relay (defaults to "direct")
+    #[serde(default)]
+    pub connection_type: ConnectionType,
     /// SSH ProxyJump host for relay/NAT traversal
     #[serde(default)]
     pub proxy_jump: Option<String>,
+    /// Relay account username (for relay connections)
+    #[serde(default)]
+    pub relay_username: Option<String>,
+    /// Relay device name (for relay connections)
+    #[serde(default)]
+    pub relay_device: Option<String>,
+    /// Latch session name (for relay connections, defaults to "default")
+    #[serde(default)]
+    pub session_name: Option<String>,
 }
 
 impl Config {

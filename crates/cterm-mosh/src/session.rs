@@ -9,7 +9,7 @@ use crate::crypto::MoshCrypto;
 use crate::proto::{HostMessage, UserMessage};
 use crate::ssh_launch::launch_mosh_server;
 use crate::ssp::SspState;
-use crate::{MoshCommand, MoshConfig, MoshError, MoshEvent};
+use crate::{MoshCommand, MoshConfig, MoshConnectionType, MoshError, MoshEvent};
 
 /// A running mosh session.
 pub struct MoshSession {
@@ -28,6 +28,7 @@ impl MoshSession {
         // Launch mosh-server via SSH
         let info = launch_mosh_server(
             &config.host,
+            &config.connection_type,
             config.proxy_jump.as_deref(),
             config.locale.as_deref(),
             config.term.as_deref(),
@@ -44,16 +45,34 @@ impl MoshSession {
         // Create crypto
         let crypto = MoshCrypto::new(&info.key)?;
 
-        // Determine target address.
-        // If relay (proxy_jump set), connect to the SSH host (relay rewrites the port).
-        // Otherwise use the IP from mosh-server or the SSH host.
-        let target_host = info
-            .ip
-            .as_deref()
-            .unwrap_or_else(|| extract_hostname(&config.host));
+        // Determine UDP target address.
+        //
+        // For relay connections, the relay rewrites the MOSH CONNECT port to its
+        // own public UDP port. The UDP target must be the relay's IP, not the
+        // actual target host. Fallback chain (matching mobile app):
+        //   1. MOSH IP annotation from latch (always the latest relay address)
+        //   2. Resolved IP of the jump host we tunneled through (same relay)
+        //   3. The jump host hostname (geo-routed fallback)
+        //
+        // For direct connections, use MOSH IP if present, otherwise the SSH host.
+        let target_host = match &config.connection_type {
+            MoshConnectionType::Relay { jump_host, .. } => {
+                if let Some(ref ip) = info.ip {
+                    ip.clone()
+                } else if let Some(ref addr) = info.jump_host_address {
+                    addr.clone()
+                } else {
+                    jump_host.clone()
+                }
+            }
+            MoshConnectionType::Direct => info
+                .ip
+                .clone()
+                .unwrap_or_else(|| extract_hostname(&config.host).to_string()),
+        };
 
         // Resolve hostname to address
-        let target_addr = resolve_addr(target_host, info.port).await?;
+        let target_addr = resolve_addr(&target_host, info.port).await?;
 
         log::info!("connecting UDP to {}", target_addr);
 

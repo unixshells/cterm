@@ -11,7 +11,7 @@ use winapi::shared::windef::HWND;
 use winapi::um::winuser::*;
 
 use crate::dialog_utils::*;
-use cterm_app::config::{load_config, save_config, ConnectionMethod, RemoteConfig};
+use cterm_app::config::{load_config, save_config, ConnectionMethod, ConnectionType, RemoteConfig};
 
 // Control IDs
 const IDC_REMOTE_COMBO: i32 = 1001;
@@ -21,6 +21,10 @@ const IDC_REMOTE_NAME: i32 = 1004;
 const IDC_REMOTE_HOST: i32 = 1005;
 const IDC_REMOTE_METHOD: i32 = 1006;
 const IDC_REMOTE_PROXY: i32 = 1007;
+const IDC_REMOTE_CONN_TYPE: i32 = 1008;
+const IDC_REMOTE_RELAY_USER: i32 = 1009;
+const IDC_REMOTE_RELAY_DEVICE: i32 = 1010;
+const IDC_REMOTE_SESSION_NAME: i32 = 1011;
 
 struct RemotesDialogState {
     remotes: Vec<RemoteConfig>,
@@ -75,7 +79,7 @@ pub fn show_remotes_dialog(parent: HWND) -> bool {
 fn build_remotes_dialog_template() -> Vec<u8> {
     let mut template = Vec::new();
     let width: i16 = 260;
-    let height: i16 = 210;
+    let height: i16 = 320;
     let style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT;
     let ex_style = 0u32;
     let c_dit = 0u16;
@@ -185,10 +189,63 @@ unsafe fn init_remotes_dialog(hwnd: HWND) {
     add_combobox_item(method_combo, "Mosh");
     set_combobox_selection(method_combo, 0);
 
-    // Proxy Jump field
+    // Connection type combobox
     let field_y4 = field_y3 + 28;
-    create_label(hwnd, -1, "Proxy:", margin, field_y4 + 3, label_width, 20);
-    create_edit(hwnd, IDC_REMOTE_PROXY, edit_x, field_y4, edit_width, 22);
+    create_label(hwnd, -1, "Type:", margin, field_y4 + 3, label_width, 20);
+    create_combobox(hwnd, IDC_REMOTE_CONN_TYPE, edit_x, field_y4, edit_width, 22);
+    let conn_type_combo = get_dialog_item(hwnd, IDC_REMOTE_CONN_TYPE);
+    add_combobox_item(conn_type_combo, "Direct");
+    add_combobox_item(conn_type_combo, "Relay");
+    set_combobox_selection(conn_type_combo, 0);
+
+    // Proxy/Relay host field
+    let field_y5 = field_y4 + 28;
+    create_label(hwnd, -1, "Proxy:", margin, field_y5 + 3, label_width, 20);
+    create_edit(hwnd, IDC_REMOTE_PROXY, edit_x, field_y5, edit_width, 22);
+
+    // Relay Username field
+    let field_y6 = field_y5 + 28;
+    create_label(
+        hwnd,
+        -1,
+        "Relay User:",
+        margin,
+        field_y6 + 3,
+        label_width,
+        20,
+    );
+    create_edit(
+        hwnd,
+        IDC_REMOTE_RELAY_USER,
+        edit_x,
+        field_y6,
+        edit_width,
+        22,
+    );
+
+    // Relay Device field
+    let field_y7 = field_y6 + 28;
+    create_label(hwnd, -1, "Device:", margin, field_y7 + 3, label_width, 20);
+    create_edit(
+        hwnd,
+        IDC_REMOTE_RELAY_DEVICE,
+        edit_x,
+        field_y7,
+        edit_width,
+        22,
+    );
+
+    // Session Name field
+    let field_y8 = field_y7 + 28;
+    create_label(hwnd, -1, "Session:", margin, field_y8 + 3, label_width, 20);
+    create_edit(
+        hwnd,
+        IDC_REMOTE_SESSION_NAME,
+        edit_x,
+        field_y8,
+        edit_width,
+        22,
+    );
 
     // Cancel / Save buttons at bottom
     let btn_y = dlg_height - button_height - margin;
@@ -243,7 +300,11 @@ fn load_selected(hwnd: HWND) {
     let name_edit = get_dialog_item(hwnd, IDC_REMOTE_NAME);
     let host_edit = get_dialog_item(hwnd, IDC_REMOTE_HOST);
     let method_combo = get_dialog_item(hwnd, IDC_REMOTE_METHOD);
+    let conn_type_combo = get_dialog_item(hwnd, IDC_REMOTE_CONN_TYPE);
     let proxy_edit = get_dialog_item(hwnd, IDC_REMOTE_PROXY);
+    let relay_user_edit = get_dialog_item(hwnd, IDC_REMOTE_RELAY_USER);
+    let relay_device_edit = get_dialog_item(hwnd, IDC_REMOTE_RELAY_DEVICE);
+    let session_name_edit = get_dialog_item(hwnd, IDC_REMOTE_SESSION_NAME);
 
     REMOTES_STATE.with(|s| {
         if let Some(ref state) = *s.borrow() {
@@ -258,31 +319,57 @@ fn load_selected(hwnd: HWND) {
                             ConnectionMethod::Mosh => 1,
                         },
                     );
+                    set_combobox_selection(
+                        conn_type_combo,
+                        match remote.connection_type {
+                            ConnectionType::Direct => 0,
+                            ConnectionType::Relay => 1,
+                        },
+                    );
                     set_edit_text(proxy_edit, remote.proxy_jump.as_deref().unwrap_or(""));
+                    set_edit_text(
+                        relay_user_edit,
+                        remote.relay_username.as_deref().unwrap_or(""),
+                    );
+                    set_edit_text(
+                        relay_device_edit,
+                        remote.relay_device.as_deref().unwrap_or(""),
+                    );
+                    set_edit_text(
+                        session_name_edit,
+                        remote.session_name.as_deref().unwrap_or(""),
+                    );
                     return;
                 }
             }
             set_edit_text(name_edit, "");
             set_edit_text(host_edit, "");
             set_combobox_selection(method_combo, 0);
+            set_combobox_selection(conn_type_combo, 0);
             set_edit_text(proxy_edit, "");
+            set_edit_text(relay_user_edit, "");
+            set_edit_text(relay_device_edit, "");
+            set_edit_text(session_name_edit, "");
         }
     });
 }
 
 fn save_current_fields(hwnd: HWND) {
-    let name_edit = get_dialog_item(hwnd, IDC_REMOTE_NAME);
-    let host_edit = get_dialog_item(hwnd, IDC_REMOTE_HOST);
-    let method_combo = get_dialog_item(hwnd, IDC_REMOTE_METHOD);
-    let proxy_edit = get_dialog_item(hwnd, IDC_REMOTE_PROXY);
-    let name = get_edit_text(name_edit);
-    let host = get_edit_text(host_edit);
-    let method = match get_combobox_selection(method_combo) {
+    let name = get_edit_text(get_dialog_item(hwnd, IDC_REMOTE_NAME));
+    let host = get_edit_text(get_dialog_item(hwnd, IDC_REMOTE_HOST));
+    let method = match get_combobox_selection(get_dialog_item(hwnd, IDC_REMOTE_METHOD)) {
         Some(1) => ConnectionMethod::Mosh,
         _ => ConnectionMethod::Daemon,
     };
-    let proxy = get_edit_text(proxy_edit);
-    let proxy_jump = if proxy.is_empty() { None } else { Some(proxy) };
+    let connection_type = match get_combobox_selection(get_dialog_item(hwnd, IDC_REMOTE_CONN_TYPE))
+    {
+        Some(1) => ConnectionType::Relay,
+        _ => ConnectionType::Direct,
+    };
+    let proxy_jump = opt_text(get_dialog_item(hwnd, IDC_REMOTE_PROXY));
+    let relay_username = opt_text(get_dialog_item(hwnd, IDC_REMOTE_RELAY_USER));
+    let relay_device = opt_text(get_dialog_item(hwnd, IDC_REMOTE_RELAY_DEVICE));
+    let session_name = opt_text(get_dialog_item(hwnd, IDC_REMOTE_SESSION_NAME));
 
     REMOTES_STATE.with(|s| {
         if let Some(ref mut state) = *s.borrow_mut() {
@@ -291,11 +378,24 @@ fn save_current_fields(hwnd: HWND) {
                     remote.name = name;
                     remote.host = host;
                     remote.method = method;
+                    remote.connection_type = connection_type;
                     remote.proxy_jump = proxy_jump;
+                    remote.relay_username = relay_username;
+                    remote.relay_device = relay_device;
+                    remote.session_name = session_name;
                 }
             }
         }
     });
+}
+
+fn opt_text(hwnd: HWND) -> Option<String> {
+    let val = get_edit_text(hwnd);
+    if val.is_empty() {
+        None
+    } else {
+        Some(val)
+    }
 }
 
 unsafe fn handle_remotes_command(hwnd: HWND, id: i32, code: u16) {
@@ -329,7 +429,11 @@ unsafe fn handle_remotes_command(hwnd: HWND, id: i32, code: u16) {
                         name,
                         host: String::new(),
                         method: Default::default(),
+                        connection_type: Default::default(),
                         proxy_jump: None,
+                        relay_username: None,
+                        relay_device: None,
+                        session_name: None,
                     });
                     state.current_index = Some(state.remotes.len() - 1);
                 }
@@ -374,8 +478,14 @@ unsafe fn handle_remotes_command(hwnd: HWND, id: i32, code: u16) {
                 load_selected(hwnd);
             }
         }
-        IDC_REMOTE_NAME | IDC_REMOTE_HOST | IDC_REMOTE_PROXY if code == EN_CHANGE => {
-            // Save and refresh combo to show updated name/host
+        IDC_REMOTE_NAME
+        | IDC_REMOTE_HOST
+        | IDC_REMOTE_PROXY
+        | IDC_REMOTE_RELAY_USER
+        | IDC_REMOTE_RELAY_DEVICE
+        | IDC_REMOTE_SESSION_NAME
+            if code == EN_CHANGE =>
+        {
             let is_updating =
                 REMOTES_STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.updating));
             if !is_updating {
@@ -383,7 +493,7 @@ unsafe fn handle_remotes_command(hwnd: HWND, id: i32, code: u16) {
                 refresh_combo(hwnd);
             }
         }
-        IDC_REMOTE_METHOD if code == CBN_SELCHANGE => {
+        IDC_REMOTE_METHOD | IDC_REMOTE_CONN_TYPE if code == CBN_SELCHANGE => {
             let is_updating =
                 REMOTES_STATE.with(|s| s.borrow().as_ref().is_some_and(|st| st.updating));
             if !is_updating {
@@ -411,7 +521,11 @@ mod tests {
                 name: "test".to_string(),
                 host: "user@host".to_string(),
                 method: Default::default(),
+                connection_type: Default::default(),
                 proxy_jump: None,
+                relay_username: None,
+                relay_device: None,
+                session_name: None,
             }],
             current_index: Some(0),
             updating: false,

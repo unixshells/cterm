@@ -9,7 +9,7 @@ use gtk4::{
     Orientation, PopoverMenuBar,
 };
 
-use cterm_app::config::Config;
+use cterm_app::config::{Config, ConnectionType, RemoteConfig};
 use cterm_app::file_transfer::PendingFileManager;
 use cterm_app::shortcuts::ShortcutManager;
 use cterm_ui::events::{Action, KeyCode, Modifiers};
@@ -2812,15 +2812,7 @@ fn create_tab_from_template(
 
     if is_mosh {
         let remote = remote_cfg.unwrap();
-        let mosh_config = cterm_mosh::MoshConfig {
-            host: remote.host.clone(),
-            proxy_jump: remote.proxy_jump.clone(),
-            cols: 80,
-            rows: 24,
-            locale: Some("en_US.UTF-8".to_string()),
-            term: Some("xterm-256color".to_string()),
-            ssh_args: Vec::new(),
-        };
+        let mosh_config = mosh_config_from_remote(&remote, 80, 24);
         drop(cfg);
 
         spawn_mosh_tab(
@@ -3227,4 +3219,49 @@ fn calculate_initial_cell_dimensions(config: &Config) -> CellDimensions {
         "Failed to load any font or measure text. \
          Please ensure fonts are installed (e.g., fonts-dejavu or similar)."
     );
+}
+
+/// Build a MoshConfig from a RemoteConfig.
+fn mosh_config_from_remote(remote: &RemoteConfig, cols: u16, rows: u16) -> cterm_mosh::MoshConfig {
+    let connection_type = match remote.connection_type {
+        ConnectionType::Relay => {
+            let relay_host = remote
+                .proxy_jump
+                .as_deref()
+                .unwrap_or("unixshells.com")
+                .to_string();
+            let jump_host = format!("relay.{}", relay_host);
+            cterm_mosh::MoshConnectionType::Relay {
+                relay_host: relay_host.clone(),
+                jump_host,
+                relay_username: remote
+                    .relay_username
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+                relay_device: remote
+                    .relay_device
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+                session_name: remote
+                    .session_name
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+            }
+        }
+        ConnectionType::Direct => cterm_mosh::MoshConnectionType::Direct,
+    };
+    cterm_mosh::MoshConfig {
+        host: remote.host.clone(),
+        connection_type,
+        proxy_jump: if remote.connection_type == ConnectionType::Direct {
+            remote.proxy_jump.clone()
+        } else {
+            None
+        },
+        cols,
+        rows,
+        locale: Some("en_US.UTF-8".to_string()),
+        term: Some("xterm-256color".to_string()),
+        ssh_args: Vec::new(),
+    }
 }
