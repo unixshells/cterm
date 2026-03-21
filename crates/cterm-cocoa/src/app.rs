@@ -1207,6 +1207,7 @@ impl AppDelegate {
                     template_color,
                     template_bg_color,
                     remote,
+                    None,
                 );
             } else {
                 // No key window — create a new standalone daemon-backed window

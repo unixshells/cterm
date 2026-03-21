@@ -149,19 +149,25 @@ define_class!(
         fn new_window_for_tab(&self, _sender: Option<&objc2::runtime::AnyObject>) -> *mut NSWindow {
             let mtm = MainThreadMarker::from(self);
 
+            let active = self.ivars().active_terminal.borrow();
+
             // Get the current working directory from the active terminal
             #[cfg(unix)]
-            let cwd = self
-                .ivars()
-                .active_terminal
-                .borrow()
-                .as_ref()
-                .and_then(|t| t.foreground_cwd());
+            let cwd = active.as_ref().and_then(|t| t.foreground_cwd());
             #[cfg(not(unix))]
             let cwd: Option<String> = None;
 
-            let new_window =
-                CtermWindow::new_with_cwd(mtm, &self.ivars().config, &self.ivars().theme, cwd);
+            // Inherit the daemon socket from the active tab (for remote sessions)
+            let daemon_socket = active.as_ref().and_then(|t| t.daemon_socket());
+            drop(active);
+
+            let new_window = CtermWindow::new_with_cwd_and_socket(
+                mtm,
+                &self.ivars().config,
+                &self.ivars().theme,
+                cwd,
+                daemon_socket,
+            );
 
             // Register with AppDelegate for tracking
             let app = NSApplication::sharedApplication(mtm);
@@ -333,8 +339,27 @@ impl CtermWindow {
         theme: &Theme,
         cwd: Option<String>,
     ) -> Retained<Self> {
+        Self::new_with_cwd_and_socket(mtm, config, theme, cwd, None)
+    }
+
+    pub fn new_with_cwd_and_socket(
+        mtm: MainThreadMarker,
+        config: &Config,
+        theme: &Theme,
+        cwd: Option<String>,
+        daemon_socket: Option<std::path::PathBuf>,
+    ) -> Retained<Self> {
         let this = Self::init_window(mtm, config, theme, "Terminal", None);
-        this.spawn_initial_daemon_session(cwd);
+        let config = this.ivars().config.clone();
+        let opts = cterm_client::CreateSessionOpts {
+            cols: 80,
+            rows: 24,
+            shell: config.general.default_shell.clone(),
+            args: config.general.shell_args.clone(),
+            cwd,
+            ..Default::default()
+        };
+        this.spawn_initial_daemon_session_with_opts(opts, None, daemon_socket);
         this
     }
 
@@ -350,14 +375,19 @@ impl CtermWindow {
             cwd,
             ..Default::default()
         };
-        self.spawn_initial_daemon_session_with_opts(opts, None);
+        self.spawn_initial_daemon_session_with_opts(opts, None, None);
     }
 
     /// Spawn a daemon session with custom options in the background and attach when ready.
+    ///
+    /// If `daemon_socket` is `Some`, connect to that specific daemon socket instead
+    /// of the local default. This is used to inherit the daemon context from the
+    /// current tab (e.g. when opening a new tab on a remote ctermd).
     fn spawn_initial_daemon_session_with_opts(
         &self,
         opts: cterm_client::CreateSessionOpts,
         background_color: Option<String>,
+        daemon_socket: Option<std::path::PathBuf>,
     ) {
         let config = self.ivars().config.clone();
         let theme = self.ivars().theme.clone();
@@ -370,7 +400,11 @@ impl CtermWindow {
 
             let result = match rt {
                 Ok(rt) => rt.block_on(async {
-                    let conn = cterm_client::DaemonConnection::connect_local().await?;
+                    let conn = if let Some(ref path) = daemon_socket {
+                        cterm_client::DaemonConnection::connect_unix(path, false).await?
+                    } else {
+                        cterm_client::DaemonConnection::connect_local().await?
+                    };
                     let session = conn.create_session(opts).await?;
                     Ok::<_, cterm_client::ClientError>(session)
                 }),
@@ -408,7 +442,7 @@ impl CtermWindow {
         background_color: Option<String>,
     ) -> Retained<Self> {
         let this = Self::init_window(mtm, config, theme, &title, color.clone());
-        this.spawn_initial_daemon_session_with_opts(opts, background_color);
+        this.spawn_initial_daemon_session_with_opts(opts, background_color, None);
         this
     }
 
@@ -489,16 +523,17 @@ impl CtermWindow {
 
     /// Create a new tab (daemon-backed via ctermd)
     pub fn create_new_tab(&self) {
+        let active = self.ivars().active_terminal.borrow();
+
         // Get the current working directory from the active terminal
         #[cfg(unix)]
-        let cwd = self
-            .ivars()
-            .active_terminal
-            .borrow()
-            .as_ref()
-            .and_then(|t| t.foreground_cwd());
+        let cwd = active.as_ref().and_then(|t| t.foreground_cwd());
         #[cfg(not(unix))]
         let cwd: Option<String> = None;
+
+        // Inherit the daemon socket from the active tab (for remote sessions)
+        let daemon_socket = active.as_ref().and_then(|t| t.daemon_socket());
+        drop(active);
 
         let config = self.ivars().config.clone();
         let opts = cterm_client::CreateSessionOpts {
@@ -510,14 +545,15 @@ impl CtermWindow {
             ..Default::default()
         };
 
-        self.spawn_daemon_tab(opts, None, None, None, None);
+        self.spawn_daemon_tab(opts, None, None, None, None, daemon_socket);
     }
 
     /// Spawn a daemon session in a background thread and create a tab when ready.
     ///
     /// If `remote` is `Some((manager, name, host))`, the session is created on
-    /// the remote ctermd (connecting via SSH if needed). Otherwise it uses the
-    /// local daemon.
+    /// the remote ctermd (connecting via SSH if needed). If `daemon_socket` is
+    /// `Some`, connect to that specific daemon socket. Otherwise uses the local
+    /// daemon.
     pub fn spawn_daemon_tab(
         &self,
         opts: cterm_client::CreateSessionOpts,
@@ -525,6 +561,7 @@ impl CtermWindow {
         color: Option<String>,
         background_color: Option<String>,
         remote: Option<(cterm_client::RemoteManager, String, String)>,
+        daemon_socket: Option<std::path::PathBuf>,
     ) {
         let config = self.ivars().config.clone();
         let theme = self.ivars().theme.clone();
@@ -541,6 +578,8 @@ impl CtermWindow {
                 Ok(rt) => rt.block_on(async {
                     let conn = if let Some((mgr, ref name, ref host)) = remote {
                         mgr.get_or_connect(name, host).await?
+                    } else if let Some(ref path) = daemon_socket {
+                        cterm_client::DaemonConnection::connect_unix(path, false).await?
                     } else {
                         cterm_client::DaemonConnection::connect_local().await?
                     };
@@ -856,6 +895,7 @@ impl CtermWindow {
             Some(template.name.clone()),
             template.color.clone(),
             template.background_color.clone(),
+            None,
             None,
         );
     }

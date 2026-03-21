@@ -101,6 +101,8 @@ pub struct TerminalViewIvars {
     color_palette: cterm_core::color::ColorPalette,
     /// Command channel for daemon I/O (write + resize) — None for local PTY sessions
     daemon_cmd_tx: RefCell<Option<tokio::sync::mpsc::UnboundedSender<DaemonCommand>>>,
+    /// Socket path for the daemon this terminal is connected to (None = local default)
+    daemon_socket: RefCell<Option<std::path::PathBuf>>,
 }
 
 define_class!(
@@ -1329,6 +1331,7 @@ impl TerminalView {
             file_manager: RefCell::new(PendingFileManager::new()),
             color_palette: theme.colors.clone(),
             daemon_cmd_tx: RefCell::new(None),
+            daemon_socket: RefCell::new(None),
         });
 
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -1389,15 +1392,16 @@ impl TerminalView {
             ViewInitOptions::default(),
         );
 
-        // Store daemon session ID and command channel for resize notifications
+        // Store daemon session ID, command channel, and socket path
         this.set_session_id(Some(sid.clone()));
         *this.ivars().daemon_cmd_tx.borrow_mut() = Some(cmd_tx);
+        let daemon_socket = session.socket_path().map(|p| p.to_owned());
+        *this.ivars().daemon_socket.borrow_mut() = daemon_socket.clone();
 
         let view_ptr = &*this as *const _ as usize;
 
         // Start daemon I/O thread — owns the connection, handles reads and writes
         let state_clone = state.clone();
-        let daemon_socket = session.socket_path().map(|p| p.to_owned());
         std::thread::spawn(move || {
             Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx, daemon_socket);
         });
@@ -1454,15 +1458,16 @@ impl TerminalView {
             ViewInitOptions::default(),
         );
 
-        // Store daemon session ID and command channel for resize notifications
+        // Store daemon session ID, command channel, and socket path
         this.set_session_id(Some(sid.clone()));
         *this.ivars().daemon_cmd_tx.borrow_mut() = Some(cmd_tx);
+        let daemon_socket = recon.handle.socket_path().map(|p| p.to_owned());
+        *this.ivars().daemon_socket.borrow_mut() = daemon_socket.clone();
 
         let view_ptr = &*this as *const _ as usize;
 
         // Start daemon I/O thread — owns the connection, handles reads and writes
         let state_clone = state.clone();
-        let daemon_socket = recon.handle.socket_path().map(|p| p.to_owned());
         std::thread::spawn(move || {
             Self::read_daemon_loop(sid, terminal, state_clone, cmd_rx, daemon_socket);
         });
@@ -2112,6 +2117,11 @@ impl TerminalView {
             .lock()
             .foreground_cwd()
             .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Get the daemon socket path this terminal is connected to (None = local default)
+    pub fn daemon_socket(&self) -> Option<std::path::PathBuf> {
+        self.ivars().daemon_socket.borrow().clone()
     }
 
     /// Request display update
