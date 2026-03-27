@@ -736,7 +736,7 @@ define_class!(
                 let result = match rt {
                     Ok(rt) => rt.block_on(async {
                         let conn =
-                            cterm_client::DaemonConnection::connect_ssh(&host).await?;
+                            cterm_client::DaemonConnection::connect_ssh(&host, true).await?;
 
                         // Attach to all existing running sessions
                         let mut sessions =
@@ -1194,6 +1194,7 @@ impl AppDelegate {
                         self.ivars().remote_manager.clone(),
                         name.clone(),
                         rc.host.clone(),
+                        rc.ssh_compression,
                     )
                 })
             });

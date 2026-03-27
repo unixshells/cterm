@@ -247,8 +247,14 @@ impl WindowState {
                 return Ok(tab_id);
             }
 
-            let remote =
-                remote_cfg.map(|r| (self.remote_manager.clone(), r.name.clone(), r.host.clone()));
+            let remote = remote_cfg.map(|r| {
+                (
+                    self.remote_manager.clone(),
+                    r.name.clone(),
+                    r.host.clone(),
+                    r.ssh_compression,
+                )
+            });
             let (cols, rows) = self.terminal_size();
             let opts = cterm_client::CreateSessionOpts {
                 cols: cols as u32,
@@ -500,7 +506,7 @@ impl WindowState {
         color: Option<String>,
         background_color: Option<String>,
         _keep_open: bool,
-        remote: Option<(cterm_client::RemoteManager, String, String)>,
+        remote: Option<(cterm_client::RemoteManager, String, String, bool)>,
     ) -> u64 {
         let tab_id = self.next_tab_id.fetch_add(1, Ordering::SeqCst);
         let (cols, rows) = self.terminal_size();
@@ -1385,7 +1391,7 @@ impl WindowState {
                             rows: rows as u32,
                             ..Default::default()
                         };
-                        let remote = Some((self.remote_manager.clone(), host.clone(), host));
+                        let remote = Some((self.remote_manager.clone(), host.clone(), host, true));
                         self.spawn_daemon_tab(opts, "SSH".to_string(), None, None, false, remote);
                     }
                 }
@@ -2113,7 +2119,7 @@ fn start_daemon_create_thread(
     tab_id: u64,
     terminal: Arc<Mutex<Terminal>>,
     opts: cterm_client::CreateSessionOpts,
-    remote: Option<(cterm_client::RemoteManager, String, String)>,
+    remote: Option<(cterm_client::RemoteManager, String, String, bool)>,
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<DaemonCmd>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -2130,8 +2136,8 @@ fn start_daemon_create_thread(
         };
 
         rt.block_on(async move {
-            let conn = if let Some((ref mgr, ref name, ref host)) = remote {
-                match mgr.get_or_connect(name, host).await {
+            let conn = if let Some((ref mgr, ref name, ref host, compress)) = remote {
+                match mgr.get_or_connect(name, host, compress).await {
                     Ok(c) => c,
                     Err(e) => {
                         log::error!("Failed to connect to remote: {}", e);

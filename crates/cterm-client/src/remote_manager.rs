@@ -31,8 +31,14 @@ impl RemoteManager {
     /// Get an existing connection for `remote_name`, or connect via SSH to `host`.
     ///
     /// The `host` parameter is the SSH destination (e.g. `user@hostname`).
+    /// When `compress` is true, SSH compression (`-C`) is enabled on the tunnel.
     #[cfg(unix)]
-    pub async fn get_or_connect(&self, remote_name: &str, host: &str) -> Result<DaemonConnection> {
+    pub async fn get_or_connect(
+        &self,
+        remote_name: &str,
+        host: &str,
+        compress: bool,
+    ) -> Result<DaemonConnection> {
         let mut map = self.connections.lock().await;
 
         if let Some(conn) = map.get(remote_name) {
@@ -41,14 +47,19 @@ impl RemoteManager {
         }
 
         log::info!("Connecting to remote '{}' ({})", remote_name, host);
-        let conn = DaemonConnection::connect_ssh(host).await?;
+        let conn = DaemonConnection::connect_ssh(host, compress).await?;
         map.insert(remote_name.to_string(), conn.clone());
         Ok(conn)
     }
 
     /// Get an existing connection for `remote_name`, or connect via SSH to `host`.
     #[cfg(not(unix))]
-    pub async fn get_or_connect(&self, remote_name: &str, _host: &str) -> Result<DaemonConnection> {
+    pub async fn get_or_connect(
+        &self,
+        remote_name: &str,
+        _host: &str,
+        _compress: bool,
+    ) -> Result<DaemonConnection> {
         Err(ClientError::Connection(format!(
             "Remote connections are not supported on this platform (remote: {})",
             remote_name

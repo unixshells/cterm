@@ -110,6 +110,10 @@ pub struct RemoteConfig {
     /// Latch session name (for relay connections, defaults to "default")
     #[serde(default)]
     pub session_name: Option<String>,
+    /// Enable SSH compression (-C flag). Defaults to true.
+    /// Reduces bandwidth for remote connections, especially useful on slow/mobile networks.
+    #[serde(default = "default_true")]
+    pub ssh_compression: bool,
 }
 
 impl Config {

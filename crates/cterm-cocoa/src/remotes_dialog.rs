@@ -63,6 +63,7 @@ define_class!(
                 relay_username: None,
                 relay_device: None,
                 session_name: None,
+                ssh_compression: true,
             });
             let new_idx = config.remotes.len() - 1;
             drop(config);

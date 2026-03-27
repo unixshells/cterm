@@ -567,7 +567,7 @@ impl CtermWindow {
         template_name: Option<String>,
         color: Option<String>,
         background_color: Option<String>,
-        remote: Option<(cterm_client::RemoteManager, String, String)>,
+        remote: Option<(cterm_client::RemoteManager, String, String, bool)>,
         daemon_socket: Option<std::path::PathBuf>,
     ) {
         let config = self.ivars().config.clone();
@@ -583,8 +583,8 @@ impl CtermWindow {
 
             let result = match rt {
                 Ok(rt) => rt.block_on(async {
-                    let conn = if let Some((mgr, ref name, ref host)) = remote {
-                        mgr.get_or_connect(name, host).await?
+                    let conn = if let Some((mgr, ref name, ref host, compress)) = remote {
+                        mgr.get_or_connect(name, host, compress).await?
                     } else if let Some(ref path) = daemon_socket {
                         cterm_client::DaemonConnection::connect_unix(path, false).await?
                     } else {

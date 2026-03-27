@@ -2402,7 +2402,7 @@ fn spawn_daemon_tab(
     color: Option<String>,
     background_color: Option<String>,
     keep_open: bool,
-    remote: Option<(cterm_client::RemoteManager, String, String)>,
+    remote: Option<(cterm_client::RemoteManager, String, String, bool)>,
     daemon_socket: Option<std::path::PathBuf>,
 ) {
     let notebook = notebook.clone();
@@ -2427,8 +2427,8 @@ fn spawn_daemon_tab(
             Ok(rt) => rt.block_on(async {
                 let conn = if let Some(ref path) = daemon_socket {
                     cterm_client::DaemonConnection::connect_unix(path, false).await?
-                } else if let Some((ref mgr, ref name, ref host)) = remote {
-                    mgr.get_or_connect(name, host).await?
+                } else if let Some((ref mgr, ref name, ref host, compress)) = remote {
+                    mgr.get_or_connect(name, host, compress).await?
                 } else {
                     cterm_client::DaemonConnection::connect_local().await?
                 };
@@ -2833,7 +2833,14 @@ fn create_tab_from_template(
             template.keep_open,
         );
     } else {
-        let remote = remote_cfg.map(|r| (remote_manager.clone(), r.name.clone(), r.host.clone()));
+        let remote = remote_cfg.map(|r| {
+            (
+                remote_manager.clone(),
+                r.name.clone(),
+                r.host.clone(),
+                r.ssh_compression,
+            )
+        });
         drop(cfg);
 
         spawn_daemon_tab(

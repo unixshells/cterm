@@ -291,6 +291,7 @@ where
                 relay_username: None,
                 relay_device: None,
                 session_name: None,
+                ssh_compression: true,
             });
             let new_idx = cfg.remotes.len() - 1;
             populate_combo(&fields.remote_combo, &cfg.remotes);

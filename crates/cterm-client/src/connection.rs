@@ -163,8 +163,10 @@ impl DaemonConnection {
     /// sessions survive SSH disconnects and can be reattached.
     ///
     /// The `host` parameter can be `user@hostname` or just `hostname`.
+    /// When `compress` is true, SSH compression (`-C`) is enabled on the tunnel,
+    /// which significantly reduces bandwidth for terminal data (scrollback, screen snapshots).
     #[cfg(unix)]
-    pub async fn connect_ssh(host: &str) -> Result<Self> {
+    pub async fn connect_ssh(host: &str, compress: bool) -> Result<Self> {
         log::info!("Connecting to {} via SSH", host);
 
         // 1. Single SSH command: find/install ctermd, start daemon, print socket path
@@ -227,19 +229,26 @@ impl DaemonConnection {
         // the daemon reader thread creates its own runtime and reconnects via this socket.
         let forward_spec = format!("{}:{}", local_socket.display(), remote_socket);
 
-        log::info!("Starting SSH tunnel: -L {}", forward_spec);
+        log::info!(
+            "Starting SSH tunnel: -L {} (compression={})",
+            forward_spec,
+            compress
+        );
+
+        let mut tunnel_args = vec![
+            "-N", // No remote command
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "StreamLocalBindUnlink=yes",
+        ];
+        if compress {
+            tunnel_args.push("-C");
+        }
+        tunnel_args.extend(["-L", &forward_spec, host]);
 
         let mut tunnel = Command::new("ssh")
-            .args([
-                "-N", // No remote command
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "StreamLocalBindUnlink=yes",
-                "-L",
-                &forward_spec,
-                host,
-            ])
+            .args(&tunnel_args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
