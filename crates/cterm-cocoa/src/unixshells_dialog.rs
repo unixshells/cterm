@@ -86,7 +86,7 @@ define_class!(
                     .load(std::sync::atomic::Ordering::Relaxed),
             );
 
-            let timer_block = block2::RcBlock::new(move || {
+            let timer_block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
                 let current = ds.version.load(std::sync::atomic::Ordering::Relaxed);
                 if current == last_version.get() {
                     return;
