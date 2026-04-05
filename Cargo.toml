@@ -98,6 +98,7 @@ aead = { version = "0.5", features = ["std"] }
 # Latch (SSH/Mosh/Web server in ctermd)
 russh = { version = "0.58", default-features = false, features = ["flate2", "ring"] }
 ssh-key = { version = "0.6", features = ["std", "ed25519"] }
+ed25519-dalek = "2"
 rand = "0.9"
 tokio-tungstenite = "0.29"
 rcgen = "0.14"

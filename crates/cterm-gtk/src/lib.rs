@@ -15,6 +15,7 @@ mod session_dialog;
 mod tab_bar;
 mod tab_templates_dialog;
 mod terminal_widget;
+mod unixshells_dialog;
 mod update_dialog;
 mod upgrade_receiver;
 mod window;

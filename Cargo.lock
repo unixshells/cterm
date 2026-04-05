@@ -739,6 +739,7 @@ dependencies = [
 name = "cterm-app"
 version = "0.0.16"
 dependencies = [
+ "anyhow",
  "base64",
  "bincode",
  "cterm-client",
@@ -746,9 +747,11 @@ dependencies = [
  "cterm-proto",
  "cterm-ui",
  "directories",
+ "ed25519-dalek",
  "env_logger",
  "flate2",
  "futures-util",
+ "hostname",
  "libc",
  "log",
  "parking_lot",
@@ -757,6 +760,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "ssh-key",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
