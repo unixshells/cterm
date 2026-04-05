@@ -76,7 +76,7 @@ fn build_dialog_template() -> Vec<u8> {
 }
 
 fn align_to_word(v: &mut Vec<u8>) {
-    while v.len() % 2 != 0 {
+    if !v.len().is_multiple_of(2) {
         v.push(0);
     }
 }

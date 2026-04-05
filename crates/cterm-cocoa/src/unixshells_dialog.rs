@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, sel, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSButton, NSProgressIndicator, NSStackView, NSTextField, NSWindow, NSWindowDelegate,
     NSWindowStyleMask,
@@ -20,7 +20,6 @@ pub struct UnixShellsDialogIvars {
     device_service: Arc<DeviceService>,
     username_field: RefCell<Option<Retained<NSTextField>>>,
     status_label: RefCell<Option<Retained<NSTextField>>>,
-    spinner: RefCell<Option<Retained<NSProgressIndicator>>>,
     signin_button: RefCell<Option<Retained<NSButton>>>,
 }
 
@@ -43,7 +42,10 @@ define_class!(
         fn action_sign_in(&self, _sender: Option<&objc2::runtime::AnyObject>) {
             let username = {
                 let field = self.ivars().username_field.borrow();
-                field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default()
+                field
+                    .as_ref()
+                    .map(|f| f.stringValue().to_string())
+                    .unwrap_or_default()
             };
             let username = username.trim().to_lowercase();
             if username.is_empty() {
@@ -52,11 +54,9 @@ define_class!(
 
             // Show waiting state
             if let Some(ref label) = *self.ivars().status_label.borrow() {
-                label.setStringValue(&NSString::from_str("Check your email to approve this device..."));
-            }
-            if let Some(ref spinner) = *self.ivars().spinner.borrow() {
-                spinner.startAnimation(None);
-                spinner.setHidden(false);
+                label.setStringValue(&NSString::from_str(
+                    "Check your email to approve this device...",
+                ));
             }
             if let Some(ref btn) = *self.ivars().signin_button.borrow() {
                 btn.setEnabled(false);
@@ -73,14 +73,19 @@ define_class!(
                 }
             });
 
-            // Poll for completion
+            // Set up polling timer
             let ds = self.ivars().device_service.clone();
             let status_label = self.ivars().status_label.borrow().clone();
-            let window: Retained<NSWindow> = self.retain().into_super();
+            let signin_button = self.ivars().signin_button.borrow().clone();
+            let username_field = self.ivars().username_field.borrow().clone();
+            let window = self as &NSWindow;
+            let window: Retained<NSWindow> = unsafe { Retained::retain(window as *const _ as *mut NSWindow).unwrap() };
 
-            let last_version = std::cell::Cell::new(ds.version.load(std::sync::atomic::Ordering::Relaxed));
+            let last_version = std::cell::Cell::new(
+                ds.version
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
 
-            // Use a dispatch timer for polling
             let timer_block = block2::RcBlock::new(move || {
                 let current = ds.version.load(std::sync::atomic::Ordering::Relaxed);
                 if current == last_version.get() {
@@ -91,16 +96,26 @@ define_class!(
                 match ds.login_state() {
                     cterm_app::unixshells::LoginState::LoggedIn { ref username } => {
                         if let Some(ref label) = status_label {
-                            label.setStringValue(&NSString::from_str(
-                                &format!("Signed in as {}", username),
-                            ));
+                            label.setStringValue(&NSString::from_str(&format!(
+                                "Signed in as {}",
+                                username
+                            )));
                         }
                         window.close();
                     }
                     cterm_app::unixshells::LoginState::LoggedOut => {
+                        let msg = ds
+                            .last_error()
+                            .unwrap_or_else(|| "Sign in failed".to_string());
                         if let Some(ref label) = status_label {
-                            let msg = ds.last_error().unwrap_or("Sign in failed".to_string());
                             label.setStringValue(&NSString::from_str(&msg));
+                        }
+                        // Re-enable controls
+                        if let Some(ref btn) = signin_button {
+                            btn.setEnabled(true);
+                        }
+                        if let Some(ref field) = username_field {
+                            field.setEnabled(true);
                         }
                     }
                     _ => {}
@@ -108,13 +123,12 @@ define_class!(
             });
 
             unsafe {
-                let timer = objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                    0.5,
-                    true,
-                    &timer_block,
-                );
-                // Timer will fire until window closes
-                let _ = timer;
+                let _timer =
+                    objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                        0.5,
+                        true,
+                        &timer_block,
+                    );
             }
         }
 
@@ -135,7 +149,6 @@ pub fn show_unixshells_dialog(mtm: MainThreadMarker, device_service: Arc<DeviceS
         device_service,
         username_field: RefCell::new(None),
         status_label: RefCell::new(None),
-        spinner: RefCell::new(None),
         signin_button: RefCell::new(None),
     });
 
@@ -193,15 +206,6 @@ pub fn show_unixshells_dialog(mtm: MainThreadMarker, device_service: Arc<DeviceS
     };
     *this.ivars().status_label.borrow_mut() = Some(status_label.clone());
     unsafe { stack.addArrangedSubview(&status_label) };
-
-    // Spinner (hidden initially)
-    let spinner = NSProgressIndicator::new(mtm);
-    unsafe {
-        spinner.setStyle(objc2_app_kit::NSProgressIndicatorStyle::Spinning);
-        spinner.setDisplayedWhenStopped(false);
-    }
-    *this.ivars().spinner.borrow_mut() = Some(spinner.clone());
-    unsafe { stack.addArrangedSubview(&spinner) };
 
     // Buttons
     let button_stack = unsafe {
