@@ -135,6 +135,15 @@ fn apply_css(theme: &Theme) {
             color: {tab_active_text};
         }}
 
+        .tab-item.has-bell {{
+            color: #e8a735;
+            font-weight: bold;
+        }}
+
+        .tab-item.has-bell .tab-bell-icon {{
+            font-size: 10px;
+        }}
+
         .tab-close-button {{
             padding: 0 2px;
             min-width: 16px;

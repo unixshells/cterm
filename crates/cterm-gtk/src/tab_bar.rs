@@ -374,6 +374,11 @@ impl TabBar {
         for tab in self.tabs.borrow().iter() {
             if tab.id == id {
                 tab.bell_icon.set_visible(visible);
+                if visible {
+                    tab.widget.add_css_class("has-bell");
+                } else {
+                    tab.widget.remove_css_class("has-bell");
+                }
                 break;
             }
         }
