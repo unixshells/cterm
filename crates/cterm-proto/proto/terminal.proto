@@ -40,6 +40,7 @@ service TerminalService {
   // Control
   rpc Resize(ResizeRequest) returns (ResizeResponse);
   rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
+  rpc ClearAlert(ClearAlertRequest) returns (ClearAlertResponse);
 
   // Event Streaming (per-session terminal events)
   rpc StreamEvents(StreamEventsRequest) returns (stream TerminalEvent);
@@ -132,6 +133,8 @@ message SessionInfo {
   bool has_foreground_process = 11;
   // Name of the foreground process (only meaningful when has_foreground_process is true)
   string foreground_process_name = 12;
+  // Whether this session has an unacknowledged bell
+  bool alerted = 13;
 }
 
 message GetSessionRequest {
@@ -517,6 +520,12 @@ message SendSignalRequest {
 message SendSignalResponse {
   bool success = 1;
 }
+
+message ClearAlertRequest {
+  string session_id = 1;
+}
+
+message ClearAlertResponse {}
 
 // ============================================================================
 // Events

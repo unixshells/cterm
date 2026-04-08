@@ -60,7 +60,12 @@ impl PtyReader {
                         timestamp_ms,
                     });
 
-                    // Broadcast any events
+                    // Broadcast events; set alerted state on bell
+                    for event in &events {
+                        if matches!(event, cterm_core::term::TerminalEvent::Bell) {
+                            session.set_alerted(true);
+                        }
+                    }
                     for event in events {
                         session.broadcast_event(event);
                     }

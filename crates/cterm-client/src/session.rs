@@ -159,6 +159,19 @@ impl SessionHandle {
         Ok(())
     }
 
+    /// Clear the bell/alert state on this session.
+    pub async fn clear_alert(&self) -> Result<()> {
+        self.client
+            .lock()
+            .await
+            .clear_alert(ClearAlertRequest {
+                session_id: self.session_id.clone(),
+            })
+            .await?;
+
+        Ok(())
+    }
+
     /// Subscribe to raw PTY output
     pub async fn stream_output(&self) -> Result<tonic::Streaming<OutputChunk>> {
         let response = self

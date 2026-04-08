@@ -81,6 +81,13 @@ impl TerminalWidget {
         }
     }
 
+    /// Tell the daemon to clear the bell/alert state for this session.
+    pub fn clear_alert(&self) {
+        if let Some(ref tx) = self.daemon_cmd_tx {
+            let _ = tx.send(DaemonCommand::ClearAlert);
+        }
+    }
+
     /// Set a custom title on the daemon (persists across reconnects)
     pub fn set_custom_title(&self, title: &str) {
         if let Some(ref tx) = self.daemon_cmd_tx {
@@ -1135,6 +1142,11 @@ impl TerminalWidget {
                                     log::error!("Failed to set template name: {}", e);
                                 }
                             }
+                            DaemonCommand::ClearAlert => {
+                                if let Err(e) = cmd_session.clear_alert().await {
+                                    log::error!("Failed to clear alert: {}", e);
+                                }
+                            }
                         }
                     }
                 });
@@ -1152,14 +1164,17 @@ impl TerminalWidget {
                             use tokio_stream::StreamExt;
                             while let Some(result) = stream.next().await {
                                 if let Ok(event) = result {
-                                    if let Some(
-                                        cterm_proto::proto::terminal_event::Event::ProcessExited(_),
-                                    ) = event.event
-                                    {
-                                        log::info!("Daemon reports process exited");
-                                        exit_notify_event.notify_one();
-                                        let _ = tx_events.send(PtyMessage::Exited);
-                                        break;
+                                    match event.event {
+                                        Some(cterm_proto::proto::terminal_event::Event::ProcessExited(_)) => {
+                                            log::info!("Daemon reports process exited");
+                                            exit_notify_event.notify_one();
+                                            let _ = tx_events.send(PtyMessage::Exited);
+                                            break;
+                                        }
+                                        Some(cterm_proto::proto::terminal_event::Event::Bell(_)) => {
+                                            let _ = tx_events.send(PtyMessage::Bell);
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -1282,6 +1297,11 @@ impl TerminalWidget {
 
                         terminal_main.lock().screen_mut().dirty = false;
                         drawing_area.queue_draw();
+                    }
+                    PtyMessage::Bell => {
+                        if let Some(ref callback) = *on_bell.borrow() {
+                            callback();
+                        }
                     }
                     PtyMessage::Exited => {
                         log::info!("Daemon session stream ended");
@@ -1469,6 +1489,11 @@ impl TerminalWidget {
                         terminal_main.lock().screen_mut().dirty = false;
                         drawing_area.queue_draw();
                     }
+                    PtyMessage::Bell => {
+                        if let Some(ref callback) = *on_bell.borrow() {
+                            callback();
+                        }
+                    }
                     PtyMessage::Exited => {
                         log::info!("Mosh session ended");
                         if let Some(ref callback) = *on_exit.borrow() {
@@ -1551,6 +1576,7 @@ fn calculate_cell_dimensions(font_family: &str, font_size: f64) -> CellDimension
 /// Messages from PTY reader thread
 enum PtyMessage {
     Data(Vec<u8>),
+    Bell,
     Exited,
 }
 
@@ -1562,6 +1588,7 @@ enum DaemonCommand {
     SetTitle(String),
     SetTabColor(String),
     SetTemplateName(String),
+    ClearAlert,
 }
 
 /// Rendering parameters for draw_terminal

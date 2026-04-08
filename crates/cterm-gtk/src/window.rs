@@ -1635,6 +1635,7 @@ impl CtermWindow {
                         let tabs = tabs.borrow();
                         if let Some(tab) = tabs.get(page_idx as usize) {
                             tab_bar.clear_bell(tab.id);
+                            tab.terminal.clear_alert();
                         }
                     }
                 }
@@ -2232,6 +2233,7 @@ impl CtermWindow {
                 window.set_title(Some(&tab.title));
                 tab_bar.set_active(tab.id);
                 tab_bar.clear_bell(tab.id);
+                tab.terminal.clear_alert();
                 *has_bell.borrow_mut() = false;
             }
         });
@@ -2319,6 +2321,7 @@ fn setup_tab_callbacks(
             notebook_click.set_current_page(Some(idx as u32));
             tab_bar_click.set_active(tab_id);
             tab_bar_click.clear_bell(tab_id);
+            tabs[idx].terminal.clear_alert();
             if let Some(widget) = notebook_click.nth_page(Some(idx as u32)) {
                 widget.grab_focus();
             }
@@ -3341,6 +3344,7 @@ fn sync_tab_bar_active(tab_bar: &TabBar, tabs: &Rc<RefCell<Vec<TabEntry>>>, note
             tab_bar.set_active(tab.id);
             // Clear bell when tab becomes active
             tab_bar.clear_bell(tab.id);
+            tab.terminal.clear_alert();
         }
     }
 }

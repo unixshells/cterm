@@ -45,6 +45,9 @@ pub struct SessionState {
     /// Template name used to create this session
     template_name: RwLock<String>,
 
+    /// Whether this session has an unacknowledged bell alert
+    alerted: std::sync::atomic::AtomicBool,
+
     /// Human-readable session name (for latch named sessions)
     session_name: RwLock<Option<String>>,
 }
@@ -93,6 +96,7 @@ impl SessionState {
             tab_color: RwLock::new(String::new()),
             template_name: RwLock::new(String::new()),
             session_name: RwLock::new(None),
+            alerted: std::sync::atomic::AtomicBool::new(false),
         });
 
         Ok(state)
@@ -133,6 +137,7 @@ impl SessionState {
             tab_color: RwLock::new(tab_color),
             template_name: RwLock::new(template_name),
             session_name: RwLock::new(None),
+            alerted: std::sync::atomic::AtomicBool::new(false),
         });
 
         Ok(state)
@@ -224,6 +229,21 @@ impl SessionState {
     /// Set the human-readable session name
     pub fn set_session_name(&self, name: Option<String>) {
         *self.session_name.write() = name;
+    }
+
+    /// Whether this session has an unacknowledged bell alert.
+    pub fn is_alerted(&self) -> bool {
+        self.alerted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set the alerted state and broadcast a bell event if newly alerted.
+    pub fn set_alerted(&self, alerted: bool) {
+        let was_alerted = self
+            .alerted
+            .swap(alerted, std::sync::atomic::Ordering::Relaxed);
+        if alerted && !was_alerted {
+            self.broadcast_event(TerminalEvent::Bell);
+        }
     }
 
     /// Check if the terminal is still running

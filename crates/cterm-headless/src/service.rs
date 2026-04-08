@@ -121,6 +121,7 @@ impl TerminalService for TerminalServiceImpl {
                     template_name: s.template_name(),
                     has_foreground_process: s.has_foreground_process(),
                     foreground_process_name: s.foreground_process_name().unwrap_or_default(),
+                    alerted: s.is_alerted(),
                 }
             })
             .collect();
@@ -154,6 +155,7 @@ impl TerminalService for TerminalServiceImpl {
             template_name: session.template_name(),
             has_foreground_process: session.has_foreground_process(),
             foreground_process_name: session.foreground_process_name().unwrap_or_default(),
+            alerted: session.is_alerted(),
         };
 
         Ok(Response::new(GetSessionResponse {
@@ -448,6 +450,21 @@ impl TerminalService for TerminalServiceImpl {
         Ok(Response::new(SendSignalResponse { success: true }))
     }
 
+    async fn clear_alert(
+        &self,
+        request: Request<ClearAlertRequest>,
+    ) -> Result<Response<ClearAlertResponse>, Status> {
+        let req = request.into_inner();
+        let session = self
+            .session_manager
+            .get_session(&req.session_id)
+            .map_err(Status::from)?;
+
+        session.set_alerted(false);
+
+        Ok(Response::new(ClearAlertResponse {}))
+    }
+
     // ========================================================================
     // Event Streaming
     // ========================================================================
@@ -541,6 +558,7 @@ impl TerminalService for TerminalServiceImpl {
             template_name: session.template_name(),
             has_foreground_process: session.has_foreground_process(),
             foreground_process_name: session.foreground_process_name().unwrap_or_default(),
+            alerted: session.is_alerted(),
         };
 
         let initial_screen = if req.want_screen_snapshot {
