@@ -186,6 +186,13 @@ impl CGRenderer {
                         fg_color
                     };
 
+                    // Cornflower blue for hyperlinks with default foreground
+                    let fg_color = if cell.hyperlink.is_some() && fg.is_default() && !is_inverted {
+                        Rgb::new(100, 149, 237)
+                    } else {
+                        fg_color
+                    };
+
                     // Use double width for wide characters
                     let char_width = if cell.is_wide() {
                         self.cell_width * 2.0

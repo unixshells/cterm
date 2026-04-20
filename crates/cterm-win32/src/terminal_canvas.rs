@@ -388,11 +388,20 @@ impl TerminalRenderer {
         };
 
         let c = cell.c;
+        let has_hyperlink = cell.hyperlink.is_some();
         let needs_fg = c != ' ' && c != '\0'
             || attrs.has_underline()
+            || has_hyperlink
             || attrs.contains(CellAttrs::STRIKETHROUGH);
         let fg_brush = if needs_fg {
             Some(self.get_brush(fg)?)
+        } else {
+            None
+        };
+
+        // Separate brush for hyperlink underline (cornflower blue)
+        let hyperlink_brush = if has_hyperlink {
+            Some(self.get_brush(Rgb::new(100, 149, 237))?)
         } else {
             None
         };
@@ -443,9 +452,14 @@ impl TerminalRenderer {
             };
         }
 
-        // Draw underline
-        if attrs.has_underline() {
+        // Draw underline (also for hyperlinks)
+        if attrs.has_underline() || has_hyperlink {
             let underline_y = y + self.cell_dims.baseline + 2.0;
+            let brush = if has_hyperlink {
+                hyperlink_brush.as_ref().unwrap()
+            } else {
+                fg_brush.as_ref().unwrap()
+            };
             unsafe {
                 base.DrawLine(
                     D2D_POINT_2F { x, y: underline_y },
@@ -453,7 +467,7 @@ impl TerminalRenderer {
                         x: x + self.cell_dims.width,
                         y: underline_y,
                     },
-                    fg_brush.as_ref().unwrap(),
+                    brush,
                     1.0,
                     None,
                 )
@@ -499,6 +513,14 @@ impl TerminalRenderer {
         // Handle dim
         if cell.attrs.contains(CellAttrs::DIM) {
             fg = Rgb::new(fg.r / 2, fg.g / 2, fg.b / 2);
+        }
+
+        // Cornflower blue for hyperlinks with default foreground
+        if cell.hyperlink.is_some()
+            && cell.fg == Color::Default
+            && !cell.attrs.contains(CellAttrs::INVERSE)
+        {
+            fg = Rgb::new(100, 149, 237);
         }
 
         (fg, bg)

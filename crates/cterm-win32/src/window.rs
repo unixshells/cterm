@@ -28,7 +28,7 @@ use crate::clipboard;
 use crate::dpi::{self, DpiInfo};
 use crate::keycode;
 use crate::menu::{self, MenuAction};
-use crate::mouse::MouseState;
+use crate::mouse::{self, MouseState};
 use crate::notification_bar::{NotificationAction, NotificationBar};
 use crate::tab_bar::{TabBar, TAB_BAR_HEIGHT};
 use crate::terminal_canvas::TerminalRenderer;
@@ -1623,6 +1623,51 @@ impl WindowState {
         }
     }
 
+    /// Get the vertical offset from window top to terminal content area
+    fn terminal_y_offset(&self) -> f32 {
+        let tab_bar_height = self.dpi.scale_f32(TAB_BAR_HEIGHT as f32);
+        let notification_height = self.notification_bar.height() as f32;
+        tab_bar_height + notification_height
+    }
+
+    /// Get the hyperlink URI at a window pixel position, if any
+    fn hyperlink_at(&self, x: f32, y: f32) -> Option<String> {
+        let y_offset = self.terminal_y_offset();
+        if y < y_offset {
+            return None;
+        }
+        let renderer = self.renderer.as_ref()?;
+        let cell_dims = renderer.cell_dimensions();
+        let terminal = self.active_terminal()?;
+        let term = terminal.lock().unwrap();
+        let (col, row) = mouse::pixel_to_cell(x as i32, (y - y_offset) as i32, &cell_dims, 0);
+        term.screen()
+            .get_cell(row, col)
+            .and_then(|c| c.hyperlink.as_ref())
+            .map(|h| h.uri.clone())
+    }
+
+    /// Open a URL using the system default handler
+    fn open_url(&self, url: &str) {
+        use crate::dialog_utils::to_wide;
+        use std::ptr;
+        use winapi::um::shellapi::ShellExecuteW;
+        use winapi::um::winuser::SW_SHOWNORMAL;
+
+        unsafe {
+            let wide_url = to_wide(url);
+            let open = to_wide("open");
+            ShellExecuteW(
+                ptr::null_mut(),
+                open.as_ptr(),
+                wide_url.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+
     /// Handle mouse down
     pub fn on_mouse_down(&mut self, x: f32, y: f32) {
         // Check if click is in notification bar area
@@ -1636,6 +1681,35 @@ impl WindowState {
             if let Some(action) = self.notification_bar.hit_test(x, rel_y) {
                 self.handle_notification_action(action);
             }
+            return;
+        }
+
+        // Ctrl+click to open hyperlinks in the terminal area
+        let ctrl_pressed = unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(
+                windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32,
+            ) < 0
+        };
+        if ctrl_pressed {
+            if let Some(uri) = self.hyperlink_at(x, y) {
+                self.open_url(&uri);
+                return;
+            }
+        }
+    }
+
+    /// Handle mouse move for hyperlink hover
+    pub fn on_mouse_move(&mut self, x: f32, y: f32) {
+        let has_link = self.hyperlink_at(x, y).is_some();
+
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor};
+            let cursor = if has_link {
+                LoadCursorW(None, IDC_HAND).unwrap_or_default()
+            } else {
+                LoadCursorW(None, IDC_IBEAM).unwrap_or_default()
+            };
+            let _ = SetCursor(Some(cursor));
         }
     }
 
@@ -1650,6 +1724,75 @@ impl WindowState {
             if let Some(tab_id) = tab_id {
                 self.show_tab_context_menu(tab_id, x as i32, y as i32);
             }
+            return;
+        }
+
+        // Check for hyperlink under cursor in terminal area
+        if let Some(uri) = self.hyperlink_at(x, y) {
+            self.show_hyperlink_context_menu(x as i32, y as i32, &uri);
+        }
+    }
+
+    /// Show context menu for a hyperlink
+    fn show_hyperlink_context_menu(&mut self, x: i32, y: i32, uri: &str) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreatePopupMenu, DestroyMenu, InsertMenuW, TrackPopupMenu, MF_STRING, TPM_LEFTALIGN,
+            TPM_RETURNCMD, TPM_TOPALIGN,
+        };
+
+        const CMD_OPEN_URL: u32 = 11001;
+        const CMD_COPY_URL: u32 = 11002;
+
+        let uri = uri.to_string();
+
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+
+            let open_text: Vec<u16> = "Open URL\0".encode_utf16().collect();
+            let _ = InsertMenuW(
+                menu,
+                0,
+                MF_STRING,
+                CMD_OPEN_URL as usize,
+                PCWSTR(open_text.as_ptr()),
+            );
+
+            let copy_text: Vec<u16> = "Copy URL\0".encode_utf16().collect();
+            let _ = InsertMenuW(
+                menu,
+                1,
+                MF_STRING,
+                CMD_COPY_URL as usize,
+                PCWSTR(copy_text.as_ptr()),
+            );
+
+            // Get screen coordinates
+            let mut pt = windows::Win32::Foundation::POINT { x, y };
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut pt);
+
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                pt.x,
+                pt.y,
+                None,
+                self.hwnd,
+                None,
+            );
+
+            if cmd.as_bool() {
+                match cmd.0 as u32 {
+                    CMD_OPEN_URL => {
+                        self.open_url(&uri);
+                    }
+                    CMD_COPY_URL => {
+                        let _ = clipboard::copy_to_clipboard(&uri);
+                    }
+                    _ => {}
+                }
+            }
+
+            let _ = DestroyMenu(menu);
         }
     }
 
@@ -2361,6 +2504,24 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
             state.on_right_click(x, y);
             LRESULT(0)
+        }
+
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            state.on_mouse_move(x, y);
+            LRESULT(0)
+        }
+
+        WM_SETCURSOR => {
+            // If cursor is in the client area, let our mouse-move handler control the cursor
+            let hit_test = (lparam.0 & 0xFFFF) as u16;
+            if hit_test == windows::Win32::UI::WindowsAndMessaging::HTCLIENT as u16 {
+                // Return TRUE to prevent DefWindowProc from resetting the cursor
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
         }
 
         WM_COMMAND => {
