@@ -9,7 +9,7 @@ use gtk4::{
     Orientation, PopoverMenuBar,
 };
 
-use cterm_app::config::{Config, RemoteConfig};
+use cterm_app::config::Config;
 use cterm_app::file_transfer::PendingFileManager;
 use cterm_app::shortcuts::ShortcutManager;
 use cterm_ui::events::{Action, KeyCode, Modifiers};
@@ -2669,117 +2669,6 @@ fn spawn_daemon_tab(
     });
 }
 
-/// Spawn a mosh-backed tab.
-///
-/// Launches mosh-server in a background thread, then creates the terminal
-/// widget on the main thread when the connection is established.
-#[allow(clippy::too_many_arguments)]
-fn spawn_mosh_tab(
-    notebook: &Notebook,
-    tabs: &Rc<RefCell<Vec<TabEntry>>>,
-    next_tab_id: &Rc<RefCell<u64>>,
-    config: &Rc<RefCell<Config>>,
-    theme: &Theme,
-    tab_bar: &TabBar,
-    window: &ApplicationWindow,
-    has_bell: &Rc<RefCell<bool>>,
-    file_manager: &Rc<RefCell<PendingFileManager>>,
-    notification_bar: &NotificationBar,
-    mosh_config: cterm_mosh::MoshConfig,
-    title: String,
-    color: Option<String>,
-    background_color: Option<String>,
-    keep_open: bool,
-) {
-    let notebook = notebook.clone();
-    let tabs = Rc::clone(tabs);
-    let next_tab_id = Rc::clone(next_tab_id);
-    let config = Rc::clone(config);
-    let theme = theme.clone();
-    let tab_bar = tab_bar.clone();
-    let window = window.clone();
-    let has_bell = Rc::clone(has_bell);
-    let file_manager = Rc::clone(file_manager);
-    let notification_bar = notification_bar.clone();
-
-    let (tx, rx) =
-        std::sync::mpsc::channel::<Result<cterm_mosh::MoshSession, cterm_mosh::MoshError>>();
-
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-
-        let result = match rt {
-            Ok(rt) => rt.block_on(async { cterm_mosh::MoshSession::connect(mosh_config).await }),
-            Err(e) => Err(cterm_mosh::MoshError::SshFailed(e.to_string())),
-        };
-
-        let _ = tx.send(result);
-    });
-
-    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-        match rx.try_recv() {
-            Ok(result) => {
-                match result {
-                    Ok(session) => {
-                        let cfg = config.borrow();
-                        let terminal = TerminalWidget::from_mosh(session, &cfg, &theme);
-                        drop(cfg);
-
-                        if let Some(ref bg) = background_color {
-                            terminal.set_background_override(Some(bg));
-                        }
-
-                        let tab_id = generate_tab_id(&next_tab_id);
-                        let page_num =
-                            notebook.append_page(terminal.widget(), None::<&gtk4::Widget>);
-                        tab_bar.add_tab(tab_id, &title);
-
-                        if let Some(ref c) = color {
-                            tab_bar.set_color(tab_id, Some(c));
-                        }
-
-                        setup_tab_callbacks(
-                            &notebook,
-                            &tabs,
-                            &config,
-                            &tab_bar,
-                            &window,
-                            &has_bell,
-                            &file_manager,
-                            &notification_bar,
-                            &terminal,
-                            tab_id,
-                            keep_open,
-                        );
-
-                        finalize_new_tab(
-                            &notebook,
-                            &tabs,
-                            &tab_bar,
-                            tab_id,
-                            page_num,
-                            title.clone(),
-                            terminal,
-                            false,
-                            None, // no session_id for mosh
-                            None, // no daemon_socket for mosh
-                            None, // no remote_name (mosh isn't RemoteManager-tracked)
-                        );
-                    }
-                    Err(e) => {
-                        log::error!("Failed to create mosh session: {}", e);
-                    }
-                }
-                glib::ControlFlow::Break
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-        }
-    });
-}
-
 /// Create a new daemon-backed tab by attaching to a session
 #[allow(clippy::too_many_arguments)]
 fn create_daemon_tab(
@@ -2955,33 +2844,7 @@ fn create_tab_from_template(
         .as_ref()
         .and_then(|name| cfg.remotes.iter().find(|r| r.name == *name).cloned());
 
-    let is_mosh = remote_cfg
-        .as_ref()
-        .is_some_and(|r| r.method == cterm_app::config::ConnectionMethod::Mosh);
-
-    if is_mosh {
-        let remote = remote_cfg.unwrap();
-        let mosh_config = mosh_config_from_remote(&remote, 80, 24);
-        drop(cfg);
-
-        spawn_mosh_tab(
-            notebook,
-            tabs,
-            next_tab_id,
-            config,
-            theme,
-            tab_bar,
-            window,
-            has_bell,
-            file_manager,
-            notification_bar,
-            mosh_config,
-            template.name.clone(),
-            template.color.clone(),
-            template.background_color.clone(),
-            template.keep_open,
-        );
-    } else {
+    {
         let remote = remote_cfg.map(|r| {
             (
                 remote_manager.clone(),
@@ -3499,16 +3362,4 @@ fn calculate_initial_cell_dimensions(config: &Config) -> CellDimensions {
         "Failed to load any font or measure text. \
          Please ensure fonts are installed (e.g., fonts-dejavu or similar)."
     );
-}
-
-/// Build a MoshConfig from a RemoteConfig.
-fn mosh_config_from_remote(remote: &RemoteConfig, cols: u16, rows: u16) -> cterm_mosh::MoshConfig {
-    cterm_mosh::MoshConfig {
-        host: remote.host.clone(),
-        cols,
-        rows,
-        locale: Some("en_US.UTF-8".to_string()),
-        term: Some("xterm-256color".to_string()),
-        ssh_args: Vec::new(),
-    }
 }

@@ -11,13 +11,12 @@ use gtk4::{
     ResponseType, Window,
 };
 
-use cterm_app::config::{load_config, save_config, Config, ConnectionMethod, RemoteConfig};
+use cterm_app::config::{load_config, save_config, Config, RemoteConfig};
 
 /// All form fields wrapped for sharing across closures.
 struct Fields {
     name: Rc<Entry>,
     host: Rc<Entry>,
-    method: Rc<ComboBoxText>,
     remote_combo: Rc<ComboBoxText>,
 }
 
@@ -29,16 +28,11 @@ impl Fields {
             if let Some(remote) = cfg.remotes.get(idx) {
                 self.name.set_text(&remote.name);
                 self.host.set_text(&remote.host);
-                self.method.set_active(Some(match remote.method {
-                    ConnectionMethod::Daemon => 0,
-                    ConnectionMethod::Mosh => 1,
-                }));
                 return;
             }
         }
         self.name.set_text("");
         self.host.set_text("");
-        self.method.set_active(Some(0));
     }
 
     fn save(&self, config: &Rc<RefCell<Config>>) {
@@ -48,10 +42,6 @@ impl Fields {
             if let Some(remote) = cfg.remotes.get_mut(idx) {
                 remote.name = self.name.text().to_string();
                 remote.host = self.host.text().to_string();
-                remote.method = match self.method.active() {
-                    Some(1) => ConnectionMethod::Mosh,
-                    _ => ConnectionMethod::Daemon,
-                };
             }
         }
     }
@@ -80,7 +70,7 @@ where
         .transient_for(parent)
         .modal(true)
         .default_width(400)
-        .default_height(380)
+        .default_height(300)
         .build();
 
     dialog.add_button("Cancel", ResponseType::Cancel);
@@ -124,21 +114,12 @@ where
     host_entry.set_hexpand(true);
     attach_label(&grid, "Host:", row);
     grid.attach(&host_entry, 1, row, 1, 1);
-    row += 1;
-
-    let method_combo = ComboBoxText::new();
-    method_combo.append_text("ctermd");
-    method_combo.append_text("Mosh");
-    method_combo.set_active(Some(0));
-    attach_label(&grid, "Method:", row);
-    grid.attach(&method_combo, 1, row, 1, 1);
 
     content.append(&grid);
 
     let fields = Rc::new(Fields {
         name: Rc::new(name_entry),
         host: Rc::new(host_entry),
-        method: Rc::new(method_combo),
         remote_combo: Rc::new(remote_combo),
     });
 
@@ -182,8 +163,6 @@ where
         fields.name.connect_changed(move |_| u());
         let u = Rc::clone(&update);
         fields.host.connect_changed(move |_| u());
-        let u = Rc::clone(&update);
-        fields.method.connect_changed(move |_| u());
     }
 
     // Add button
@@ -196,7 +175,6 @@ where
             cfg.remotes.push(RemoteConfig {
                 name,
                 host: String::new(),
-                method: Default::default(),
                 ssh_compression: true,
             });
             let new_idx = cfg.remotes.len() - 1;

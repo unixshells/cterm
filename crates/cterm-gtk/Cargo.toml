@@ -18,7 +18,6 @@ cterm-client.workspace = true
 cterm-proto.workspace = true
 cterm-ui.workspace = true
 cterm-app.workspace = true
-cterm-mosh.workspace = true
 gtk4.workspace = true
 libadwaita = { workspace = true, optional = true }
 glib.workspace = true

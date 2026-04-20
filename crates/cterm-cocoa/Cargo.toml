@@ -13,7 +13,6 @@ cterm-client.workspace = true
 cterm-proto.workspace = true
 cterm-ui.workspace = true
 cterm-app.workspace = true
-cterm-mosh.workspace = true
 
 # Logging
 log.workspace = true

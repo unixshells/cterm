@@ -15,7 +15,7 @@ use objc2_foundation::{
 };
 use std::path::PathBuf;
 
-use cterm_app::config::{load_config, Config, RemoteConfig};
+use cterm_app::config::{load_config, Config};
 use cterm_ui::theme::Theme;
 
 use crate::menu;
@@ -1123,71 +1123,9 @@ impl AppDelegate {
             }
         }
 
-        // Check if this is a mosh connection
-        let is_mosh = remote_cfg
-            .as_ref()
-            .is_some_and(|r| r.method == cterm_app::config::ConnectionMethod::Mosh);
-
         let app = NSApplication::sharedApplication(mtm);
 
-        if is_mosh {
-            let remote = remote_cfg.unwrap();
-            let mosh_config = mosh_config_from_remote(&remote, 80, 24);
-
-            if let Some(key_window) = app.keyWindow() {
-                let window_ptr = Retained::as_ptr(&key_window) as *const CtermWindow;
-                let cterm_window: &CtermWindow = unsafe { &*window_ptr };
-                cterm_window.spawn_mosh_tab(
-                    mosh_config,
-                    Some(template_name),
-                    template_color,
-                    template_bg_color,
-                );
-            } else {
-                // Spawn mosh in background, create window on completion
-                let config_clone = config.clone();
-                let theme_clone = theme.clone();
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build();
-                    let result = match rt {
-                        Ok(rt) => rt.block_on(async {
-                            cterm_mosh::MoshSession::connect(mosh_config).await
-                        }),
-                        Err(e) => Err(cterm_mosh::MoshError::SshFailed(e.to_string())),
-                    };
-                    match result {
-                        Ok(session) => {
-                            dispatch2::Queue::main().exec_async(move || {
-                                let mtm = unsafe { MainThreadMarker::new_unchecked() };
-                                let window = CtermWindow::from_mosh(
-                                    mtm,
-                                    &config_clone,
-                                    &theme_clone,
-                                    session,
-                                );
-                                window.setTitle(&NSString::from_str(&template_name));
-                                if let Some(ref c) = template_color {
-                                    window.set_tab_color(Some(c));
-                                }
-                                window.makeKeyAndOrderFront(None);
-
-                                let app = NSApplication::sharedApplication(mtm);
-                                if let Some(delegate) = app.delegate() {
-                                    let _: () =
-                                        unsafe { msg_send![&*delegate, registerWindow: &*window] };
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            log::error!("Failed to create mosh session: {}", e);
-                        }
-                    }
-                });
-            }
-        } else {
-            // Daemon connection (original path)
+        {
             let remote = remote_cfg.and_then(|rc| {
                 template.remote.as_ref().map(|name| {
                     (
@@ -1448,16 +1386,4 @@ pub fn run_app_internal() {
 
     // Run the main event loop
     app.run();
-}
-
-/// Build a MoshConfig from a RemoteConfig.
-fn mosh_config_from_remote(remote: &RemoteConfig, cols: u16, rows: u16) -> cterm_mosh::MoshConfig {
-    cterm_mosh::MoshConfig {
-        host: remote.host.clone(),
-        cols,
-        rows,
-        locale: Some("en_US.UTF-8".to_string()),
-        term: Some("xterm-256color".to_string()),
-        ssh_args: Vec::new(),
-    }
 }
