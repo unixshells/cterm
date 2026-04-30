@@ -239,6 +239,44 @@ impl TerminalService for TerminalServiceImpl {
         }))
     }
 
+    async fn stream_input(
+        &self,
+        request: Request<tonic::Streaming<WriteInputRequest>>,
+    ) -> Result<Response<StreamInputResponse>, Status> {
+        let mut stream = request.into_inner();
+        let session_manager = Arc::clone(&self.session_manager);
+        let mut session = None;
+        let mut total_bytes: u64 = 0;
+
+        while let Some(msg) = stream.next().await {
+            let msg = msg?;
+
+            // Resolve the session lazily on the first message; subsequent
+            // messages must use the same session_id.
+            if session.is_none() {
+                session = Some(
+                    session_manager
+                        .get_session(&msg.session_id)
+                        .map_err(Status::from)?,
+                );
+            } else if let Some(ref s) = session {
+                if s.id != msg.session_id {
+                    return Err(Status::invalid_argument(
+                        "session_id mismatch within stream",
+                    ));
+                }
+            }
+
+            let s = session.as_ref().unwrap();
+            let n = s.write_input(&msg.data).map_err(Status::from)?;
+            total_bytes += n as u64;
+        }
+
+        Ok(Response::new(StreamInputResponse {
+            total_bytes_written: total_bytes,
+        }))
+    }
+
     async fn send_key(
         &self,
         request: Request<SendKeyRequest>,

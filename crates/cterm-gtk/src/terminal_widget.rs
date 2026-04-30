@@ -1194,12 +1194,68 @@ impl TerminalWidget {
                 let cmd_session = session.clone();
                 tokio::spawn(async move {
                     let mut cmd_rx = cmd_rx;
-                    while let Some(cmd) = cmd_rx.recv().await {
+
+                    // Try to open a streaming-input RPC for low-latency keystroke
+                    // delivery. Falls back to batched fire-and-forget write_input
+                    // calls if the daemon doesn't support StreamInput.
+                    let input_stream = if cmd_session.supports_stream_input().await {
+                        match cmd_session.open_input_stream().await {
+                            Ok(tx) => {
+                                log::debug!("Using StreamInput for low-latency writes");
+                                Some(tx)
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to open input stream, falling back: {}",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        log::debug!(
+                            "Daemon does not support StreamInput, using batched write_input"
+                        );
+                        None
+                    };
+
+                    let mut pushback: Option<DaemonCommand> = None;
+                    loop {
+                        let cmd = match pushback.take() {
+                            Some(c) => c,
+                            None => match cmd_rx.recv().await {
+                                Some(c) => c,
+                                None => break,
+                            },
+                        };
+
                         match cmd {
                             DaemonCommand::Write(data) => {
-                                if let Err(e) = cmd_session.write_input(&data).await {
-                                    log::error!("Failed to write to daemon: {}", e);
-                                    break;
+                                if let Some(ref tx) = input_stream {
+                                    if tx.send(data).is_err() {
+                                        log::error!("Input stream closed unexpectedly");
+                                        break;
+                                    }
+                                } else {
+                                    // Fallback: batch consecutive writes, fire-and-forget the RPC
+                                    let mut batch = data;
+                                    while let Ok(next) = cmd_rx.try_recv() {
+                                        match next {
+                                            DaemonCommand::Write(more) => {
+                                                batch.extend_from_slice(&more)
+                                            }
+                                            other => {
+                                                pushback = Some(other);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let s = cmd_session.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = s.write_input(&batch).await {
+                                            log::error!("Failed to write to daemon: {}", e);
+                                        }
+                                    });
                                 }
                             }
                             DaemonCommand::Resize(cols, rows) => {

@@ -23,6 +23,9 @@ service TerminalService {
 
   // Input
   rpc WriteInput(WriteInputRequest) returns (WriteInputResponse);
+  // Streaming input — open a long-lived stream and shove keystrokes through it.
+  // Avoids the per-keystroke round-trip that WriteInput incurs.
+  rpc StreamInput(stream WriteInputRequest) returns (StreamInputResponse);
   rpc SendKey(SendKeyRequest) returns (SendKeyResponse);
 
   // Output Streaming (raw PTY data - for local clients doing their own parsing)
@@ -226,6 +229,11 @@ message WriteInputRequest {
 
 message WriteInputResponse {
   uint32 bytes_written = 1;
+}
+
+message StreamInputResponse {
+  // Total bytes written across all stream messages
+  uint64 total_bytes_written = 1;
 }
 
 message SendKeyRequest {

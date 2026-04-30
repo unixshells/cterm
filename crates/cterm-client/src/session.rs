@@ -5,7 +5,10 @@ use crate::error::Result;
 use cterm_proto::proto::terminal_service_client::TerminalServiceClient;
 use cterm_proto::proto::*;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
 /// Handle to a terminal session on ctermd
@@ -63,6 +66,48 @@ impl SessionHandle {
             .await?;
 
         Ok(response.into_inner().bytes_written)
+    }
+
+    /// Probe whether the daemon supports the StreamInput RPC by opening
+    /// an empty stream. Returns false if the server returns Unimplemented
+    /// (older daemons) or any other error.
+    pub async fn supports_stream_input(&self) -> bool {
+        let mut client = self.client.lock().await.clone();
+        let empty_stream = tokio_stream::iter(Vec::<WriteInputRequest>::new());
+        match client.stream_input(empty_stream).await {
+            Ok(_) => true,
+            Err(status) => status.code() != tonic::Code::Unimplemented,
+        }
+    }
+
+    /// Open a long-lived StreamInput RPC for low-latency keystroke delivery.
+    ///
+    /// Returns an unbounded sender; bytes pushed into it are forwarded to the
+    /// daemon over a single gRPC stream — no per-message round-trip.
+    /// The stream lives until the sender is dropped or the server closes the
+    /// stream (errors are logged, not propagated).
+    ///
+    /// Caller should use `supports_stream_input()` first to detect old daemons.
+    pub async fn open_input_stream(&self) -> Result<UnboundedSender<Vec<u8>>> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let session_id = self.session_id.clone();
+        let stream = UnboundedReceiverStream::new(rx).map(move |data| WriteInputRequest {
+            session_id: session_id.clone(),
+            data,
+        });
+
+        let mut client = self.client.lock().await.clone();
+        tokio::spawn(async move {
+            match client.stream_input(stream).await {
+                Ok(resp) => log::debug!(
+                    "StreamInput finished cleanly ({} bytes)",
+                    resp.into_inner().total_bytes_written
+                ),
+                Err(e) => log::warn!("StreamInput stream ended with error: {}", e),
+            }
+        });
+
+        Ok(tx)
     }
 
     /// Send a key event
